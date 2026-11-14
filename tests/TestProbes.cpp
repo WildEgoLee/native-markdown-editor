@@ -61,6 +61,10 @@ private slots:
     void testMathFormulaAsyncRenderingAndProjection();
     void testMermaidDiagramAsyncRenderingAndInteraction();
     void testAsyncRenderServiceCachingAndThreadSafety();
+    void testCacheKeyRenderKindIsolation();
+    void testMermaidCyclicAndSelfLoopLayoutBoundedness();
+    void testAsyncRenderServiceLRUAndEpochCancellation();
+    void testNestedFractionsAndUnsupportedFallback();
 };
 
 // Probe 1: UTF-8 BOM, CRLF, trailing spaces, no-newline exact byte-for-byte invariance
@@ -2139,8 +2143,122 @@ void TestProbes::testAsyncRenderServiceCachingAndThreadSafety() {
 
     // Clear cache
     service->clearCache();
-    QVERIFY(!service->isCached(mathSource));
-    QVERIFY(!service->isCached(mermaidSource));
+    QVERIFY(!service->isCached(mathSource, Render::RenderKind::Math));
+    QVERIFY(!service->isCached(mermaidSource, Render::RenderKind::Mermaid));
+}
+
+// Probe 34: P0-1 Cache key isolation between RenderKind::Math and RenderKind::Mermaid
+void TestProbes::testCacheKeyRenderKindIsolation() {
+    auto service = Render::AsyncRenderService::instance();
+    QVERIFY(service != nullptr);
+
+    service->clearCache();
+
+    // Identical raw source string
+    QString sharedSource = QStringLiteral("A --> B");
+
+    // Render as Math
+    auto mathRenderer = service->getRenderer(sharedSource, Render::RenderKind::Math, true);
+    QVERIFY(mathRenderer != nullptr);
+    QVERIFY(service->isCached(sharedSource, Render::RenderKind::Math));
+    QVERIFY(!service->isCached(sharedSource, Render::RenderKind::Mermaid));
+
+    // Render as Mermaid
+    auto mermaidRenderer = service->getRenderer(sharedSource, Render::RenderKind::Mermaid, true);
+    QVERIFY(mermaidRenderer != nullptr);
+    QVERIFY(service->isCached(sharedSource, Render::RenderKind::Math));
+    QVERIFY(service->isCached(sharedSource, Render::RenderKind::Mermaid));
+
+    // Verify both are cached simultaneously without overwriting
+    QCOMPARE(service->cacheCount(), 2);
+    QVERIFY(service->getRenderer(sharedSource, Render::RenderKind::Math, false) == mathRenderer);
+    QVERIFY(service->getRenderer(sharedSource, Render::RenderKind::Mermaid, false) == mermaidRenderer);
+}
+
+// Probe 35: P0-2 Mermaid cyclic graphs and self-loops layout boundedness
+void TestProbes::testMermaidCyclicAndSelfLoopLayoutBoundedness() {
+    // 1. Self-loop
+    QString selfLoopDoc = QStringLiteral("graph TD\nA[Node A] --> A");
+    QByteArray slSvg = Render::MermaidSvgRenderer::renderToSvg(selfLoopDoc);
+    QVERIFY(!slSvg.isEmpty());
+    QVERIFY(slSvg.contains("<svg"));
+    QVERIFY(slSvg.contains("Node A"));
+
+    // 2. Direct 2-node cycle (A -> B -> A)
+    QString twoNodeCycle = QStringLiteral("graph TD\nA[Alpha] --> B[Beta]\nB --> A");
+    QByteArray tncSvg = Render::MermaidSvgRenderer::renderToSvg(twoNodeCycle);
+    QVERIFY(!tncSvg.isEmpty());
+    QVERIFY(tncSvg.contains("Alpha"));
+    QVERIFY(tncSvg.contains("Beta"));
+
+    // 3. Multi-node cycle with branches
+    QString complexCycle = QStringLiteral(
+        "graph TD\n"
+        "Start[Start Step] --> Check{Is Valid?}\n"
+        "Check -->|Yes| Process[Process Step]\n"
+        "Process --> Check\n"
+        "Check -->|No| Done[Final Step]\n"
+    );
+    QByteArray ccSvg = Render::MermaidSvgRenderer::renderToSvg(complexCycle);
+    QVERIFY(!ccSvg.isEmpty());
+    QVERIFY(ccSvg.contains("Start Step"));
+    QVERIFY(ccSvg.contains("Process Step"));
+    QVERIFY(ccSvg.contains("Final Step"));
+
+    // Layout dimensions must be strictly bounded (< 1500px, never exploding into tens of thousands)
+    QSize estimated = Render::MermaidSvgRenderer::estimateSize(complexCycle);
+    QVERIFY(estimated.width() <= 1500);
+    QVERIFY(estimated.height() <= 1500);
+}
+
+// Probe 36: P1 AsyncRenderService LRU eviction and epoch cancellation
+void TestProbes::testAsyncRenderServiceLRUAndEpochCancellation() {
+    auto service = Render::AsyncRenderService::instance();
+    QVERIFY(service != nullptr);
+
+    service->clearCache();
+    service->setMaxCacheEntries(4);
+
+    // Populate 6 distinct entries
+    for (int i = 0; i < 6; ++i) {
+        QString formula = QStringLiteral("$$x_%1 = %1$$").arg(i);
+        service->getRenderer(formula, Render::RenderKind::Math, true);
+    }
+
+    // Cache count must be capped by maxCacheEntries
+    QCOMPARE(service->cacheCount(), 4);
+
+    // The oldest entries (0 and 1) should have been evicted
+    QVERIFY(!service->isCached(QStringLiteral("$$x_0 = 0$$"), Render::RenderKind::Math));
+    QVERIFY(!service->isCached(QStringLiteral("$$x_1 = 1$$"), Render::RenderKind::Math));
+    // Recent entries (2..5) must still be cached
+    QVERIFY(service->isCached(QStringLiteral("$$x_5 = 5$$"), Render::RenderKind::Math));
+
+    // Restore default cache size
+    service->setMaxCacheEntries(128);
+    service->clearCache();
+    QCOMPARE(service->cacheCount(), 0);
+}
+
+// Probe 37: P1 Nested fractions and unsupported syntax fallback
+void TestProbes::testNestedFractionsAndUnsupportedFallback() {
+    // 1. Nested fraction layout: \frac{\frac{a}{b}+c}{d}
+    QString nestedFrac = QStringLiteral("$$\\frac{\\frac{a}{b}+c}{d}$$");
+    QByteArray nSvg = Render::MathSvgRenderer::renderToSvg(nestedFrac);
+    QVERIFY(!nSvg.isEmpty());
+    QVERIFY(nSvg.contains("<line")); // Multiple fraction bars
+
+    // 2. Unbalanced braces warning fallback
+    QString unbalanced = QStringLiteral("$$\\frac{a}{b$$");
+    QByteArray ubSvg = Render::MathSvgRenderer::renderToSvg(unbalanced);
+    QVERIFY(!ubSvg.isEmpty());
+    QVERIFY(ubSvg.contains("LaTeX: Unbalanced Braces"));
+
+    // 3. Unsupported Mermaid diagram type graceful card
+    QString unsupportedMermaid = QStringLiteral("pie title Pets\n\"Dogs\" : 386\n\"Cats\" : 85");
+    QByteArray umSvg = Render::MermaidSvgRenderer::renderToSvg(unsupportedMermaid);
+    QVERIFY(!umSvg.isEmpty());
+    QVERIFY(umSvg.contains("Unsupported Diagram: pie"));
 }
 
 QTEST_MAIN(TestProbes)

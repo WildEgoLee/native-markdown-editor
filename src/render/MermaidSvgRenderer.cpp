@@ -4,8 +4,11 @@
 #include <QRegularExpression>
 #include <QMap>
 #include <QVector>
+#include <QSet>
+#include <QPair>
 #include <cmath>
 #include <algorithm>
+#include <functional>
 
 namespace MarkdownTool::Render {
 
@@ -21,6 +24,24 @@ static QString escapeXml(const QString &str) {
         else out.append(c);
     }
     return out;
+}
+
+static QByteArray generateUnsupportedCard(const QString &diagramType, const QString &codeSnippet) {
+    QString snippet = codeSnippet.left(60);
+    if (codeSnippet.length() > 60) snippet.append(QStringLiteral("..."));
+
+    QString svg = QStringLiteral(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"460\" height=\"120\" viewBox=\"0 0 460 120\">\n"
+        "  <rect x=\"4\" y=\"4\" width=\"452\" height=\"112\" rx=\"8\" fill=\"#F8FAFC\" stroke=\"#CBD5E1\" stroke-width=\"1.5\" />\n"
+        "  <rect x=\"20\" y=\"20\" width=\"86\" height=\"22\" rx=\"4\" fill=\"#FEF3C7\" stroke=\"#F59E0B\" stroke-width=\"1\" />\n"
+        "  <text x=\"63\" y=\"35\" font-family=\"'Segoe UI', -apple-system, sans-serif\" font-size=\"11\" font-weight=\"600\" fill=\"#B45309\" text-anchor=\"middle\">Mermaid</text>\n"
+        "  <text x=\"116\" y=\"35\" font-family=\"'Segoe UI', -apple-system, sans-serif\" font-size=\"12\" font-weight=\"600\" fill=\"#1E293B\">Unsupported Diagram: %1</text>\n"
+        "  <text x=\"20\" y=\"64\" font-family=\"'Segoe UI', -apple-system, sans-serif\" font-size=\"11\" fill=\"#64748B\">Preview supports Flowchart (TD/LR) and Sequence Diagrams.</text>\n"
+        "  <text x=\"20\" y=\"88\" font-family=\"Consolas, 'Courier New', monospace\" font-size=\"11\" fill=\"#334155\">%2</text>\n"
+        "</svg>\n").arg(escapeXml(diagramType)).arg(escapeXml(snippet));
+
+    return svg.toUtf8();
 }
 
 struct NodeInfo {
@@ -44,12 +65,27 @@ struct EdgeInfo {
 
 QSize MermaidSvgRenderer::estimateSize(const QString &mermaidCode) {
     QStringList lines = mermaidCode.split(u'\n');
-    int lineCount = static_cast<int>(lines.size());
-    bool isLR = mermaidCode.contains(QStringLiteral("LR")) || mermaidCode.contains(QStringLiteral("lr"));
-    if (isLR) {
-        return QSize(std::max(350, lineCount * 120), 180);
+    QString firstLine;
+    for (const auto &l : lines) {
+        QString trimmed = l.trimmed();
+        if (!trimmed.isEmpty() && !trimmed.startsWith(QStringLiteral("%%"))) {
+            firstLine = trimmed;
+            break;
+        }
     }
-    return QSize(std::max(300, 400), std::max(160, lineCount * 65));
+
+    bool isGraph = firstLine.startsWith(QStringLiteral("graph")) || firstLine.startsWith(QStringLiteral("flowchart"));
+    bool isSeq = firstLine.startsWith(QStringLiteral("sequenceDiagram"));
+    if (!isGraph && !isSeq) {
+        return QSize(460, 120);
+    }
+
+    int lineCount = static_cast<int>(lines.size());
+    bool isLR = firstLine.contains(QStringLiteral("LR")) || firstLine.contains(QStringLiteral("lr"));
+    if (isLR) {
+        return QSize(std::clamp(lineCount * 120 + 200, 350, 1200), 180);
+    }
+    return QSize(std::clamp(lineCount * 30 + 350, 350, 1200), std::clamp(lineCount * 65 + 100, 160, 1000));
 }
 
 QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
@@ -63,8 +99,15 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
         }
     }
 
-    bool isLR = firstLine.contains(QStringLiteral("LR")) || firstLine.contains(QStringLiteral("lr"));
+    bool isFlowchart = firstLine.startsWith(QStringLiteral("graph")) || firstLine.startsWith(QStringLiteral("flowchart"));
     bool isSequence = firstLine.startsWith(QStringLiteral("sequenceDiagram"));
+
+    // Graceful handling of unsupported diagram types
+    if (!isFlowchart && !isSequence) {
+        QString diagramType = firstLine.section(u' ', 0, 0);
+        if (diagramType.isEmpty()) diagramType = QStringLiteral("Unknown");
+        return generateUnsupportedCard(diagramType, mermaidCode.trimmed());
+    }
 
     // Sequence Diagram renderer
     if (isSequence) {
@@ -115,9 +158,9 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
 
         int pCount = static_cast<int>(participants.size());
         qreal colWidth = 160.0;
-        qreal totalWidth = std::max(380.0, pCount * colWidth + 60.0);
+        qreal totalWidth = std::clamp(pCount * colWidth + 60.0, 380.0, 3000.0);
         qreal rowHeight = 48.0;
-        qreal totalHeight = std::max(180.0, static_cast<qreal>(messages.size()) * rowHeight + 110.0);
+        qreal totalHeight = std::clamp(static_cast<qreal>(messages.size()) * rowHeight + 110.0, 180.0, 3000.0);
 
         QString svg;
         svg.append(QStringLiteral(
@@ -168,6 +211,8 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
     }
 
     // Graph / Flowchart renderer (TD / LR)
+    bool isLR = firstLine.contains(QStringLiteral("LR")) || firstLine.contains(QStringLiteral("lr"));
+
     QMap<QString, NodeInfo> nodes;
     QVector<EdgeInfo> edges;
 
@@ -223,24 +268,64 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
         nodes[d.id] = d;
     }
 
-    // Calculate layout ranks (BFS / Layering)
-    QMap<QString, int> ranks;
-    for (const auto &k : nodes.keys()) ranks[k] = 0;
-
-    for (int pass = 0; pass < nodes.size(); ++pass) {
-        for (const auto &e : edges) {
-            if (ranks.contains(e.from) && ranks.contains(e.to)) {
-                ranks[e.to] = std::max(ranks[e.to], ranks[e.from] + 1);
-            }
+    // 1. Cycle detection using DFS back-edge detection
+    QMap<QString, QStringList> adj;
+    for (const auto &e : edges) {
+        if (e.from != e.to && nodes.contains(e.from) && nodes.contains(e.to)) {
+            adj[e.from].append(e.to);
         }
     }
 
+    QMap<QString, int> visitState; // 0 = unvisited, 1 = visiting (in stack), 2 = visited
+    QSet<QPair<QString, QString>> backEdges;
+
+    std::function<void(const QString&)> dfs = [&](const QString &u) {
+        visitState[u] = 1;
+        for (const QString &v : adj.value(u)) {
+            if (visitState.value(v, 0) == 1) {
+                backEdges.insert(qMakePair(u, v));
+            } else if (visitState.value(v, 0) == 0) {
+                dfs(v);
+            }
+        }
+        visitState[u] = 2;
+    };
+
+    for (const QString &k : nodes.keys()) {
+        if (visitState.value(k, 0) == 0) {
+            dfs(k);
+        }
+    }
+
+    // 2. DAG Layering (ignoring back-edges and self-loops)
+    QMap<QString, int> ranks;
+    for (const auto &k : nodes.keys()) ranks[k] = 0;
+
+    int maxPasses = std::min(50, static_cast<int>(nodes.size()));
+    for (int pass = 0; pass < maxPasses; ++pass) {
+        bool changed = false;
+        for (const auto &e : edges) {
+            if (e.from == e.to || backEdges.contains(qMakePair(e.from, e.to))) {
+                continue;
+            }
+            if (ranks.contains(e.from) && ranks.contains(e.to)) {
+                if (ranks[e.from] + 1 > ranks[e.to]) {
+                    ranks[e.to] = ranks[e.from] + 1;
+                    changed = true;
+                }
+            }
+        }
+        if (!changed) break;
+    }
+
+    // 3. Compact rank groups (only existing ranks, no empty rank overhead)
     QMap<int, QStringList> rankGroups;
-    int maxRank = 0;
     for (auto it = ranks.begin(); it != ranks.end(); ++it) {
         rankGroups[it.value()].append(it.key());
-        maxRank = std::max(maxRank, it.value());
     }
+
+    QList<int> sortedRanks = rankGroups.keys();
+    std::sort(sortedRanks.begin(), sortedRanks.end());
 
     qreal totalWidth = 0;
     qreal totalHeight = 0;
@@ -248,7 +333,7 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
     if (isLR) {
         qreal layerX = 30.0;
         qreal maxColH = 0.0;
-        for (int r = 0; r <= maxRank; ++r) {
+        for (int r : sortedRanks) {
             const auto &group = rankGroups[r];
             qreal curY = 30.0;
             qreal maxW = 120.0;
@@ -262,13 +347,13 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
             maxColH = std::max(maxColH, curY);
             layerX += maxW + 65.0;
         }
-        totalWidth = std::max(360.0, layerX);
-        totalHeight = std::max(140.0, maxColH + 10.0);
+        totalWidth = std::clamp(layerX, 360.0, 3000.0);
+        totalHeight = std::clamp(maxColH + 10.0, 140.0, 3000.0);
     } else {
         // Top-Down
         qreal layerY = 30.0;
         qreal maxRowW = 0.0;
-        for (int r = 0; r <= maxRank; ++r) {
+        for (int r : sortedRanks) {
             const auto &group = rankGroups[r];
             qreal totalW = 0.0;
             for (const auto &id : group) totalW += nodes[id].w + 24.0;
@@ -283,8 +368,8 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
             }
             layerY += 42.0 + 50.0;
         }
-        totalWidth = std::max(360.0, maxRowW + 40.0);
-        totalHeight = std::max(140.0, layerY);
+        totalWidth = std::clamp(maxRowW + 40.0, 360.0, 3000.0);
+        totalHeight = std::clamp(layerY, 140.0, 3000.0);
     }
 
     QString svg;
@@ -300,12 +385,51 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
         "    </filter>\n"
         "  </defs>\n").arg(totalWidth).arg(totalHeight));
 
-    // Draw Edges
+    // Draw Edges (with special handling for self-loops and back-edges)
     for (const auto &e : edges) {
         if (!nodes.contains(e.from) || !nodes.contains(e.to)) continue;
         const auto &n1 = nodes[e.from];
         const auto &n2 = nodes[e.to];
 
+        QString dash = e.isDashed ? QStringLiteral(" stroke-dasharray=\"4,3\"") : QString();
+        qreal strokeWidth = e.isThick ? 2.6 : 1.8;
+
+        // 1. Self-loop
+        if (e.from == e.to) {
+            qreal sx = n1.x + n1.w * 0.75;
+            qreal sy = n1.y;
+            qreal tx = n1.x + n1.w * 0.25;
+            qreal ty = n1.y;
+            svg.append(QStringLiteral("<path d=\"M %1 %2 C %1 %3, %4 %3, %4 %5\" fill=\"none\" stroke=\"#475569\" stroke-width=\"%6\"%7 marker-end=\"url(#mermaid-arrow)\" />\n")
+                .arg(sx).arg(sy).arg(sy - 30).arg(tx).arg(ty - 2).arg(strokeWidth).arg(dash));
+            continue;
+        }
+
+        bool isBack = backEdges.contains(qMakePair(e.from, e.to)) || (ranks.value(e.to, 0) <= ranks.value(e.from, 0));
+
+        // 2. Back-edge or cycle feedback edge
+        if (isBack) {
+            if (isLR) {
+                qreal sx = n1.x + n1.w / 2.0;
+                qreal sy = n1.y + n1.h;
+                qreal tx = n2.x + n2.w / 2.0;
+                qreal ty = n2.y + n2.h;
+                qreal arcY = std::max(sy, ty) + 32.0;
+                svg.append(QStringLiteral("<path d=\"M %1 %2 C %1 %3, %4 %3, %4 %5\" fill=\"none\" stroke=\"#475569\" stroke-width=\"%6\"%7 marker-end=\"url(#mermaid-arrow)\" />\n")
+                    .arg(sx).arg(sy).arg(arcY).arg(tx).arg(ty + 2).arg(strokeWidth).arg(dash));
+            } else {
+                qreal sx = n1.x + n1.w;
+                qreal sy = n1.y + n1.h / 2.0;
+                qreal tx = n2.x + n2.w;
+                qreal ty = n2.y + n2.h / 2.0;
+                qreal arcX = std::max(sx, tx) + 35.0;
+                svg.append(QStringLiteral("<path d=\"M %1 %2 C %3 %2, %3 %4, %5 %4\" fill=\"none\" stroke=\"#475569\" stroke-width=\"%6\"%7 marker-end=\"url(#mermaid-arrow)\" />\n")
+                    .arg(sx).arg(sy).arg(arcX).arg(ty).arg(tx + 2).arg(strokeWidth).arg(dash));
+            }
+            continue;
+        }
+
+        // 3. Normal Forward edge
         qreal x1, y1, x2, y2;
         if (isLR) {
             x1 = n1.x + n1.w;
@@ -319,10 +443,6 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
             y2 = n2.y - 2.0;
         }
 
-        QString dash = e.isDashed ? QStringLiteral(" stroke-dasharray=\"4,3\"") : QString();
-        qreal strokeWidth = e.isThick ? 2.6 : 1.8;
-
-        // Path
         if (std::abs(y1 - y2) < 4.0 || std::abs(x1 - x2) < 4.0) {
             svg.append(QStringLiteral("<line x1=\"%1\" y1=\"%2\" x2=\"%3\" y2=\"%4\" stroke=\"#475569\" stroke-width=\"%5\"%6 marker-end=\"url(#mermaid-arrow)\" />\n")
                 .arg(x1).arg(y1).arg(x2).arg(y2).arg(strokeWidth).arg(dash));

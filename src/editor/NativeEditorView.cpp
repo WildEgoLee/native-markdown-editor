@@ -51,7 +51,7 @@ NativeEditorView::NativeEditorView(QWidget *parent)
         emit textChanged();
     });
 
-    connect(Render::AsyncRenderService::instance(), &Render::AsyncRenderService::renderReady, this, [this](const QString &) {
+    connect(Render::AsyncRenderService::instance(), &Render::AsyncRenderService::renderReady, this, [this]() {
         viewport()->update();
     });
 

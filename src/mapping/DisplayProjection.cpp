@@ -290,7 +290,9 @@ bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
     // Fast path: In-Place Dirty Block Projection
     // When a single localized text edit occurs within a block and does not alter document-wide structure,
     // update only the affected visual block and shift suffix source ranges in O(affected) time.
-    if (editOffset >= 0 && !m_blocks.isEmpty() && !isSourceMode && rootNode && !buffer.isEmpty() && m_lastCursorPos >= 0) {
+    if (editOffset >= 0 && !m_blocks.isEmpty() && !isSourceMode && rootNode && !buffer.isEmpty() && m_lastCursorPos >= 0 &&
+        rootNode->children.size() == m_lastAstChildrenCount)
+    {
         int dirtyIdx = findBlockIndexBySourceOffset(editOffset);
         if (dirtyIdx > 0 && (dirtyIdx >= m_blocks.size() || editOffset < m_blocks[dirtyIdx].sourceRange.start)) {
             if (editOffset <= m_blocks[dirtyIdx - 1].sourceRange.end) {
@@ -379,6 +381,7 @@ bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
                             }
 
                             m_lastCursorPos = cursorPos;
+                            m_incrementalHits++;
                             return blockChanged || delta != 0;
                         }
                     }
@@ -387,11 +390,13 @@ bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
         }
     }
 
+    m_fullFallbacks++;
     QVector<VisualBlock> prevBlocks = std::move(m_blocks);
     m_blocks.clear();
 
     auto checkChanged = [&]() -> bool {
         m_lastCursorPos = cursorPos;
+        m_lastAstChildrenCount = rootNode ? rootNode->children.size() : 0;
         if (m_blocks.size() != prevBlocks.size()) {
             return true;
         }

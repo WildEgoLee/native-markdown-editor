@@ -354,6 +354,19 @@ bool MarkdownParserAdapter::canIncrementalParse(const SemanticNodePtr &previousR
                 // If text was removed, ensure lengthRemoved did not delete past paragraph boundaries
                 int newLen = child->fullRange.length() + (lengthAdded - lengthRemoved);
                 if (newLen > 0) {
+                    QString blockText = buffer.substring(child->fullRange.start, newLen);
+
+                    // P0: Cross-block link reference dependency safety:
+                    // 1. If this block defines a link reference (contains ']:'), editing it alters references for other blocks!
+                    if (blockText.contains(QStringLiteral("]:"))) {
+                        return false;
+                    }
+                    // 2. If the document defines reference links and this block contains brackets '[',
+                    // isolated snippet parsing cannot resolve definitions outside this block. Fall back to full parse!
+                    if (blockText.contains(u'[') && buffer.text().contains(QStringLiteral("]:"))) {
+                        return false;
+                    }
+
                     outChildIndex = i;
                     return true;
                 }
@@ -379,8 +392,11 @@ SemanticNodePtr MarkdownParserAdapter::incrementalParse(const SemanticNodePtr &p
                                                          int editOffset,
                                                          int lengthRemoved,
                                                          int lengthAdded,
-                                                         int childIndex)
+                                                         int childIndex,
+                                                         bool *outSucceeded)
 {
+    if (outSucceeded) *outSucceeded = false;
+
     if (!previousRoot || childIndex < 0 || childIndex >= previousRoot->children.size()) {
         return parse(buffer);
     }
@@ -399,13 +415,26 @@ SemanticNodePtr MarkdownParserAdapter::incrementalParse(const SemanticNodePtr &p
     snippetBuffer.setText(blockText);
 
     auto snippetRoot = parse(snippetBuffer);
-    // Double-lock safety: snippet must produce EXACTLY ONE block of the EXACT SAME type!
+    // Double-lock safety 1: snippet must produce EXACTLY ONE block of the EXACT SAME type!
     if (!snippetRoot || snippetRoot->children.size() != 1 || snippetRoot->children[0]->type != oldChild->type) {
         return parse(buffer);
     }
 
-    // Extract the parsed snippet block
     SemanticNodePtr newChild = snippetRoot->children[0];
+
+    // Double-lock safety 2: Verify inline link count semantic consistency
+    // If snippet parsing lost links (e.g. unresolved reference link), fall back to full parse!
+    auto countLinks = [](auto self, const SemanticNodePtr &node) -> int {
+        if (!node) return 0;
+        int count = (node->type == NodeType::Link || node->type == NodeType::Image) ? 1 : 0;
+        for (const auto &c : node->children) {
+            count += self(self, c);
+        }
+        return count;
+    };
+    if (countLinks(countLinks, oldChild) != countLinks(countLinks, newChild)) {
+        return parse(buffer);
+    }
 
     // Offset all ranges in newChild by +blockStart
     auto offsetNode = [blockStart](auto self, const SemanticNodePtr &node) -> void {
@@ -474,6 +503,8 @@ SemanticNodePtr MarkdownParserAdapter::incrementalParse(const SemanticNodePtr &p
     for (int i = childIndex + 1; i < previousRoot->children.size(); ++i) {
         newRoot->children[i] = shiftNode(shiftNode, previousRoot->children[i]);
     }
+
+    if (outSucceeded) *outSucceeded = true;
 
     return newRoot;
 }

@@ -71,6 +71,9 @@ public:
     int normalizeSourceCursor(int sourceOffset, bool forward) const;
     int stepCursor(int currentSourceOffset, bool forward, const Core::TextBuffer &buffer) const;
 
+    quint64 incrementalHits() const { return m_incrementalHits; }
+    quint64 fullFallbacks() const { return m_fullFallbacks; }
+
 private:
     void processBlockNode(const Parser::SemanticNodePtr &node,
                           const Core::TextBuffer &buffer,
@@ -80,6 +83,9 @@ private:
 
     QVector<VisualBlock> m_blocks;
     int m_lastCursorPos = -1;
+    int m_lastAstChildrenCount = -1;
+    quint64 m_incrementalHits = 0;
+    quint64 m_fullFallbacks = 0;
 };
 
 } // namespace MarkdownTool::Mapping

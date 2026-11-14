@@ -107,17 +107,25 @@ void NativeEditorView::selectAll() {
 
 void NativeEditorView::reparseAndRelayout(int editOffset, int lengthRemoved, int lengthAdded) {
     int childIdx = -1;
+    bool isIncrementalAst = false;
     if (editOffset >= 0 && m_rootNode &&
         m_parser.canIncrementalParse(m_rootNode, m_buffer, editOffset, lengthRemoved, lengthAdded, childIdx))
     {
-        m_rootNode = m_parser.incrementalParse(m_rootNode, m_buffer, editOffset, lengthRemoved, lengthAdded, childIdx);
-        m_incrementalParseHits++;
+        bool incSuccess = false;
+        m_rootNode = m_parser.incrementalParse(m_rootNode, m_buffer, editOffset, lengthRemoved, lengthAdded, childIdx, &incSuccess);
+        if (incSuccess) {
+            m_incrementalParseHits++;
+            isIncrementalAst = true;
+        } else {
+            m_fullParseFallbacks++;
+        }
     } else {
         m_rootNode = m_parser.parse(m_buffer);
         m_fullParseFallbacks++;
     }
 
-    m_projection.buildProjection(m_rootNode, m_buffer, m_cursorPos, m_isSourceMode, editOffset, lengthRemoved, lengthAdded);
+    int projEditOffset = isIncrementalAst ? editOffset : -1;
+    m_projection.buildProjection(m_rootNode, m_buffer, m_cursorPos, m_isSourceMode, projEditOffset, lengthRemoved, lengthAdded);
     m_layoutEngine.layout(m_projection, qMax(200, viewport()->width()));
     updateScrollBars();
     viewport()->update();

@@ -5,6 +5,7 @@
 #include <QElapsedTimer>
 #include <QImage>
 #include <cmath>
+#include <random>
 
 #include "core/Position.h"
 #include "core/TextBuffer.h"
@@ -48,6 +49,9 @@ private slots:
     void testDocumentScalePerformanceMatrix();
     void testIncrementalAstParseAndProjectionEquivalence();
     void testGuiEventDrivenInputLatency();
+    void testReferenceStyleLinkIncrementalSafety();
+    void testDifferentialFuzzingEquivalence();
+    void testLargeDocumentGuiInputLatency();
 };
 
 // Probe 1: UTF-8 BOM, CRLF, trailing spaces, no-newline exact byte-for-byte invariance
@@ -1237,7 +1241,7 @@ void TestProbes::testCacheHitPreservesBlockLayoutIdentity() {
     QCOMPARE(engine.blocks()[4].layout.get(), originalPointers[4]);
 }
 
-// Probe 23: Document Scale Performance Matrix (100 KB, 1 MB, 3 MB)
+// Probe 23: Document Scale Performance Matrix (100 KB, 1 MB, 2.5 MB)
 void TestProbes::testDocumentScalePerformanceMatrix() {
     Parser::MarkdownParserAdapter parser;
 
@@ -1257,54 +1261,88 @@ void TestProbes::testDocumentScalePerformanceMatrix() {
 
         QElapsedTimer timer;
 
-        int editOffset = doc.indexOf(QStringLiteral("伸缩能力"));
-        if (editOffset < 0) editOffset = 100;
-
-        // 1. Cold Parse
+        // Baseline: Cold Parse, Cold Proj, Cold Layout
         timer.restart();
         auto root = parser.parse(buffer);
         qreal coldParseMs = timer.nsecsElapsed() / 1000000.0;
         QVERIFY(root != nullptr);
 
-        // 2. Cold Projection
         Mapping::DisplayProjection proj;
         timer.restart();
-        proj.buildProjection(root, buffer, editOffset, false);
+        proj.buildProjection(root, buffer, 0, false);
         qreal coldProjMs = timer.nsecsElapsed() / 1000000.0;
         int blockCount = proj.blockCount();
 
-        // 3. Cold Layout
         Editor::LayoutEngine engine;
         timer.restart();
         engine.layout(proj, 800.0);
         qreal coldLayoutMs = timer.nsecsElapsed() / 1000000.0;
 
-        // 4. Incremental Edit: Modify one character in a middle paragraph
-        buffer.replace(editOffset, 2, QStringLiteral("弹性"));
+        // Helper to test real single keystroke typing at a specified paragraph offset
+        auto testKeystroke = [&](int targetOffset, int remLen, const QString &insText) -> std::tuple<qreal, qreal, qreal> {
+            buffer.replace(targetOffset, remLen, insText);
+            int addedLen = insText.length();
+            int newCursor = targetOffset + addedLen;
 
-        // Incremental AST Parse (if supported) vs Cold
-        int childIdx = -1;
-        qreal incParseMs = 0;
-        Parser::SemanticNodePtr editedRoot;
-        if (parser.canIncrementalParse(root, buffer, editOffset, 2, QStringLiteral("弹性"), childIdx)) {
+            int childIdx = -1;
+            bool canInc = parser.canIncrementalParse(root, buffer, targetOffset, remLen, addedLen, childIdx);
+            if (!canInc) {
+                return std::make_tuple(-1.0, -1.0, -1.0);
+            }
+
+            bool incSuccess = false;
             timer.restart();
-            editedRoot = parser.incrementalParse(root, buffer, editOffset, 2, 2, childIdx);
-            incParseMs = timer.nsecsElapsed() / 1000000.0;
-        } else {
+            auto editedRoot = parser.incrementalParse(root, buffer, targetOffset, remLen, addedLen, childIdx, &incSuccess);
+            qreal incParseMs = timer.nsecsElapsed() / 1000000.0;
+            if (!incSuccess || !editedRoot) {
+                return std::make_tuple(-1.0, -1.0, -1.0);
+            }
+
             timer.restart();
-            editedRoot = parser.parse(buffer);
-            incParseMs = timer.nsecsElapsed() / 1000000.0;
-        }
+            proj.buildProjection(editedRoot, buffer, newCursor, false, targetOffset, remLen, addedLen);
+            qreal incProjMs = timer.nsecsElapsed() / 1000000.0;
 
-        // Incremental Projection with Dirty Block Reconstruction
-        timer.restart();
-        proj.buildProjection(editedRoot, buffer, editOffset + 2, false, editOffset, 2, 2);
-        qreal incProjMs = timer.nsecsElapsed() / 1000000.0;
+            timer.restart();
+            engine.layout(proj, 800.0);
+            qreal incLayoutMs = timer.nsecsElapsed() / 1000000.0;
 
-        // Incremental Layout
-        timer.restart();
+            root = editedRoot;
+            return std::make_tuple(incParseMs, incProjMs, incLayoutMs);
+        };
+
+        // 1. Head Edit (+1 char insertion) in Chapter 1 paragraph
+        int headOffset = doc.indexOf(QStringLiteral("伸缩能力"));
+        QVERIFY(headOffset > 0);
+        proj.buildProjection(root, buffer, headOffset, false);
         engine.layout(proj, 800.0);
-        qreal incLayoutMs = timer.nsecsElapsed() / 1000000.0;
+        auto [headInsParse, headInsProj, headInsLayout] = testKeystroke(headOffset, 0, QStringLiteral("首"));
+        QVERIFY(headInsParse >= 0.0);
+
+        // 2. Middle Edit (+1 char insertion) in Chapter numChapters/2 paragraph
+        int midChapter = numChapters / 2;
+        QString midMarker = QStringLiteral("## 章节 %1:").arg(midChapter);
+        int midHead = buffer.text().indexOf(midMarker);
+        int midOffset = buffer.text().indexOf(QStringLiteral("伸缩能力"), midHead);
+        QVERIFY(midOffset > 0);
+        proj.buildProjection(root, buffer, midOffset, false);
+        engine.layout(proj, 800.0);
+        auto [midInsParse, midInsProj, midInsLayout] = testKeystroke(midOffset, 0, QStringLiteral("中"));
+        QVERIFY(midInsParse >= 0.0);
+
+        // 3. Middle Edit (-1 char deletion / backspace)
+        auto [midDelParse, midDelProj, midDelLayout] = testKeystroke(midOffset, 1, QString());
+        QVERIFY(midDelParse >= 0.0);
+
+        // 4. Tail Edit (+1 char insertion) in Chapter numChapters-1 paragraph
+        int tailChapter = numChapters - 1;
+        QString tailMarker = QStringLiteral("## 章节 %1:").arg(tailChapter);
+        int tailHead = buffer.text().indexOf(tailMarker);
+        int tailOffset = buffer.text().indexOf(QStringLiteral("伸缩能力"), tailHead);
+        QVERIFY(tailOffset > 0);
+        proj.buildProjection(root, buffer, tailOffset, false);
+        engine.layout(proj, 800.0);
+        auto [tailInsParse, tailInsProj, tailInsLayout] = testKeystroke(tailOffset, 0, QStringLiteral("尾"));
+        QVERIFY(tailInsParse >= 0.0);
 
         // Viewport Paint (1080p culling)
         QImage vpImg(1920, 1080, QImage::Format_ARGB32_Premultiplied);
@@ -1314,26 +1352,39 @@ void TestProbes::testDocumentScalePerformanceMatrix() {
         painter.end();
         qreal vpPaintMs = timer.nsecsElapsed() / 1000000.0;
 
-        qDebug().noquote() << QStringLiteral("| %1 | %2 KB | %3 | %4 ms | %5 ms | %6 ms | %7 ms | %8 ms | %9 ms | %10 ms |")
+        qreal midTotalIncMs = midInsParse + midInsProj + midInsLayout;
+        qreal coldTotalMs = coldParseMs + coldProjMs + coldLayoutMs;
+
+        qDebug().noquote() << QStringLiteral("| %1 | %2 KB | %3 | %4 / %5 / %6 ms | %7 / %8 / %9 ms | %10 / %11 / %12 ms | %13 / %14 / %15 ms | %16 / %17 / %18 ms | %19 ms | %20x |")
             .arg(scaleLabel, -7)
             .arg(byteSize / 1024, 7)
             .arg(blockCount, 7)
-            .arg(coldParseMs, 7, 'f', 1)
-            .arg(incParseMs, 7, 'f', 2)
-            .arg(coldProjMs, 7, 'f', 1)
-            .arg(incProjMs, 7, 'f', 2)
-            .arg(coldLayoutMs, 7, 'f', 1)
-            .arg(incLayoutMs, 7, 'f', 2)
-            .arg(vpPaintMs, 7, 'f', 2);
+            .arg(coldParseMs, 5, 'f', 1)
+            .arg(coldProjMs, 5, 'f', 1)
+            .arg(coldLayoutMs, 5, 'f', 1)
+            .arg(headInsParse, 4, 'f', 2)
+            .arg(headInsProj, 4, 'f', 2)
+            .arg(headInsLayout, 4, 'f', 2)
+            .arg(midInsParse, 4, 'f', 2)
+            .arg(midInsProj, 4, 'f', 2)
+            .arg(midInsLayout, 4, 'f', 2)
+            .arg(midDelParse, 4, 'f', 2)
+            .arg(midDelProj, 4, 'f', 2)
+            .arg(midDelLayout, 4, 'f', 2)
+            .arg(tailInsParse, 4, 'f', 2)
+            .arg(tailInsProj, 4, 'f', 2)
+            .arg(tailInsLayout, 4, 'f', 2)
+            .arg(vpPaintMs, 5, 'f', 2)
+            .arg(coldTotalMs / qMax(0.01, midTotalIncMs), 5, 'f', 1);
     };
 
-    qDebug() << "\n=========================================== Document Scale Performance Matrix ===========================================";
-    qDebug() << "| Scale   | Doc Size| Blocks  | ColdParse | IncParse  | ColdProj  | IncProj   | ColdLayout| IncLayout | ViewportPaint|";
-    qDebug() << "|---------|---------|---------|-----------|-----------|-----------|-----------|-----------|-----------|--------------|";
-    benchmarkScale(250, QStringLiteral("100 KB"));   // ~115 KB, ~1500 blocks
-    benchmarkScale(2200, QStringLiteral("1.0 MB"));  // ~1.0 MB, ~13,200 blocks
-    benchmarkScale(5000, QStringLiteral("2.5 MB"));  // ~2.5 MB, ~30,000 blocks
-    qDebug() << "=========================================================================================================================\n";
+    qDebug() << "\n================================================ Document Scale Performance Matrix (Real Typing) ================================================";
+    qDebug() << "| Scale   | Doc Size| Blocks  | Cold (Parse/Proj/Lay) | Head (+1) (Parse/Proj/Lay)| Mid (+1) (Parse/Proj/Lay) | Mid (-1) (Parse/Proj/Lay) | Tail (+1) (Parse/Proj/Lay)| VpPaint | Speedup |";
+    qDebug() << "|---------|---------|---------|-----------------------|---------------------------|---------------------------|---------------------------|---------------------------|---------|---------|";
+    benchmarkScale(250, QStringLiteral("100 KB"));   // ~115 KB, ~1250 blocks
+    benchmarkScale(2200, QStringLiteral("1.0 MB"));  // ~1.0 MB, ~11000 blocks
+    benchmarkScale(5000, QStringLiteral("2.5 MB"));  // ~2.5 MB, ~25000 blocks
+    qDebug() << "=================================================================================================================================================\n";
 }
 
 // Probe 24: Mathematical Equivalence between Incremental AST Parse / Dirty Block Projection and Cold Full Parse / Projection
@@ -1551,6 +1602,237 @@ void TestProbes::testGuiEventDrivenInputLatency() {
     // Assert responsiveness limits
     QVERIFY(eventDispatchUs < 30 * 1000); // Under 30ms
     QVERIFY(paintUs < 20 * 1000);         // Under 20ms
+}
+
+// Probe 26: Reference-Style Link Incremental AST Parse Safety & Dependency Fallback
+void TestProbes::testReferenceStyleLinkIncrementalSafety() {
+    Parser::MarkdownParserAdapter parser;
+
+    Core::TextBuffer buffer;
+    buffer.setText(QStringLiteral(
+        "# 参考链接安全测试\n\n"
+        "这是一个[参考链接][ref]测试段落。\n\n"
+        "这里是第二段普通的正文内容，完全独立且不包含链接。\n\n"
+        "[ref]: https://github.com/WildEgoLee/native-markdown-editor \"原生编辑器\"\n"
+    ));
+
+    auto baseRoot = parser.parse(buffer);
+    QVERIFY(baseRoot != nullptr);
+    QCOMPARE(baseRoot->children.size(), 3);
+
+    Mapping::DisplayProjection baseProj;
+    baseProj.buildProjection(baseRoot, buffer, 0, false);
+
+    // Verify base link was correctly parsed as Link with expected URL
+    auto findLink = [](auto self, const Parser::SemanticNodePtr &node) -> QString {
+        if (!node) return QString();
+        if (node->type == Parser::NodeType::Link) return node->linkUrl;
+        for (const auto &c : node->children) {
+            QString u = self(self, c);
+            if (!u.isEmpty()) return u;
+        }
+        return QString();
+    };
+    QCOMPARE(findLink(findLink, baseRoot), QStringLiteral("https://github.com/WildEgoLee/native-markdown-editor"));
+
+    // Case 1: Edit in Paragraph 2 (normal text without '[' or ']:')
+    // canIncrementalParse MUST return true and resolve successfully!
+    int posPara2 = buffer.text().indexOf(QStringLiteral("普通的正文内容"));
+    QVERIFY(posPara2 > 0);
+    buffer.replace(posPara2, 0, QStringLiteral("丰富拓展的"));
+
+    int childIdx = -1;
+    bool canInc = parser.canIncrementalParse(baseRoot, buffer, posPara2, 0, 5, childIdx);
+    QVERIFY(canInc);
+    QCOMPARE(childIdx, 2);
+
+    bool incSuccess = false;
+    auto incRoot = parser.incrementalParse(baseRoot, buffer, posPara2, 0, 5, childIdx, &incSuccess);
+    QVERIFY(incSuccess);
+    QVERIFY(incRoot != nullptr);
+
+    auto coldRoot = parser.parse(buffer);
+    assertSemanticNodesDeepEqual(incRoot, coldRoot);
+
+    Mapping::DisplayProjection incProj = baseProj;
+    incProj.buildProjection(incRoot, buffer, posPara2 + 5, false, posPara2, 0, 5);
+    Mapping::DisplayProjection coldProj;
+    coldProj.buildProjection(coldRoot, buffer, posPara2 + 5, false);
+    assertVisualBlocksDeepEqual(incProj.blocks(), coldProj.blocks());
+
+    // Case 2: Edit in Paragraph 1 (containing '[ref]')
+    // Because this block contains '[' and document defines ']:', isolated snippet parsing cannot
+    // resolve definitions outside this block. canIncrementalParse MUST return false!
+    int posPara1 = buffer.text().indexOf(QStringLiteral("测试段落"));
+    QVERIFY(posPara1 > 0);
+    buffer.replace(posPara1, 0, QStringLiteral("严谨"));
+
+    int childIdx1 = -1;
+    bool canInc1 = parser.canIncrementalParse(incRoot, buffer, posPara1, 0, 2, childIdx1);
+    QCOMPARE(canInc1, false); // Blocked from incremental snippet parse to protect link semantics!
+
+    // Case 3: Edit in Link Definition block '[ref]: ...'
+    // Because this block contains ']:', modifying it could break/alter links in other blocks.
+    // canIncrementalParse MUST return false!
+    int posDef = buffer.text().indexOf(QStringLiteral("[ref]:"));
+    QVERIFY(posDef > 0);
+    buffer.replace(posDef + 6, 0, QStringLiteral(" "));
+
+    int childIdxDef = -1;
+    bool canIncDef = parser.canIncrementalParse(incRoot, buffer, posDef + 6, 0, 1, childIdxDef);
+    QCOMPARE(canIncDef, false); // Blocked from incremental snippet parse!
+}
+
+// Probe 27: Differential Fuzzing / Random Testing (50 Continuous Invariant Checks)
+void TestProbes::testDifferentialFuzzingEquivalence() {
+    Parser::MarkdownParserAdapter parser;
+
+    Core::TextBuffer buffer;
+    buffer.setText(QStringLiteral(
+        "# 差异化模糊测试基准\n\n"
+        "这是首段正文内容，包含了**重要粗体**与*关键斜体*以及`代码片段`。\n\n"
+        "> 这是一个引用块，用于验证边界与嵌套行为。\n\n"
+        "- [ ] 任务一：验证模糊测试随机输入\n"
+        "- [x] 任务二：验证状态机零漂移\n\n"
+        "```cpp\nvoid fuzz() {\n    int x = 42;\n}\n```\n\n"
+        "这里是尾部普通段落，提供充足的字符供随机编辑操作。\n"
+    ));
+
+    auto currentRoot = parser.parse(buffer);
+    QVERIFY(currentRoot != nullptr);
+
+    int currentCursor = 15;
+    Mapping::DisplayProjection currentProj;
+    currentProj.buildProjection(currentRoot, buffer, currentCursor, false);
+
+    std::mt19937 rng(12345); // Deterministic seed for reproducible CI runs
+    const QString sampleChars = QStringLiteral("abcdefg 01234 快速测试 弹性排版 !?");
+
+    // 50 consecutive randomized editing transactions
+    for (int step = 0; step < 50; ++step) {
+        // Select an active paragraph node (child 1 or last child)
+        const auto &targetChild = (rng() % 2 == 0) ? currentRoot->children[1] : currentRoot->children.last();
+        int pStart = targetChild->fullRange.start;
+        int pLen = targetChild->fullRange.length();
+        if (pLen <= 6) continue;
+
+        int baseOffset = pStart + 2 + (rng() % (pLen - 4));
+        baseOffset = qBound(pStart, baseOffset, pStart + pLen);
+
+        int opType = rng() % 4;
+        int remLen = 0;
+        QString insText;
+
+        switch (opType) {
+        case 0:
+        case 1: {
+            int insertCount = (rng() % 3) + 1;
+            for (int k = 0; k < insertCount; ++k) {
+                insText.append(sampleChars.at(rng() % sampleChars.length()));
+            }
+            remLen = 0;
+            break;
+        }
+        case 2:
+            remLen = (rng() % 2) + 1;
+            remLen = qMin(remLen, targetChild->fullRange.end - baseOffset);
+            insText = QString();
+            break;
+        case 3:
+            remLen = 1;
+            insText = sampleChars.at(rng() % sampleChars.length());
+            break;
+        }
+
+        buffer.replace(baseOffset, remLen, insText);
+        int addedLen = insText.length();
+        currentCursor = baseOffset + addedLen;
+
+        int childIdx = -1;
+        bool canInc = parser.canIncrementalParse(currentRoot, buffer, baseOffset, remLen, addedLen, childIdx);
+        bool incSuccess = false;
+
+        if (canInc) {
+            auto newRoot = parser.incrementalParse(currentRoot, buffer, baseOffset, remLen, addedLen, childIdx, &incSuccess);
+            if (incSuccess) {
+                currentRoot = newRoot;
+                currentProj.buildProjection(currentRoot, buffer, currentCursor, false, baseOffset, remLen, addedLen);
+            } else {
+                currentRoot = parser.parse(buffer);
+                currentProj.buildProjection(currentRoot, buffer, currentCursor, false);
+            }
+        } else {
+            currentRoot = parser.parse(buffer);
+            currentProj.buildProjection(currentRoot, buffer, currentCursor, false);
+        }
+
+        // Differential verification against Cold Parse & Cold Projection
+        auto coldRoot = parser.parse(buffer);
+        assertSemanticNodesDeepEqual(currentRoot, coldRoot);
+
+        Mapping::DisplayProjection coldProj;
+        coldProj.buildProjection(coldRoot, buffer, currentCursor, false);
+        assertVisualBlocksDeepEqual(currentProj.blocks(), coldProj.blocks());
+    }
+}
+
+// Probe 28: Large Document GUI Event-Driven Keystroke Latency (500 KB)
+void TestProbes::testLargeDocumentGuiInputLatency() {
+    Editor::NativeEditorView view;
+    view.resize(1024, 768);
+
+    // Build a ~500 KB document (~1100 chapters)
+    QString doc;
+    doc.reserve(1100 * 450);
+    for (int i = 0; i < 1100; ++i) {
+        doc.append(QStringLiteral("## 章节 %1: 交互性能评估\n\n").arg(i + 1));
+        doc.append(QStringLiteral("测试原生窗口事件系统在大文档下的端到端响应时间与重绘吞吐。\n\n"));
+        doc.append(QStringLiteral("- 项目一：行内样式测试\n- 项目二：连续打字体验\n\n"));
+    }
+
+    view.buffer().setText(doc);
+    int midPos = doc.indexOf(QStringLiteral("端到端响应时间"), doc.length() / 2);
+    QVERIFY(midPos > 0);
+    view.setCursorPos(midPos);
+
+    quint64 initIncParseHits = view.incrementalParseHits();
+    quint64 initIncProjHits = view.incrementalProjectionHits();
+
+    // Dispatch 5 sequential real Qt KeyPress events
+    QElapsedTimer timer;
+    qint64 totalDispatchUs = 0;
+
+    const QString typeSequence = QStringLiteral("ABCDE");
+    for (int i = 0; i < typeSequence.length(); ++i) {
+        timer.restart();
+        QKeyEvent keyEvent(QEvent::KeyPress, Qt::Key_A + i, Qt::NoModifier, QString(typeSequence.at(i)));
+        bool handled = QApplication::sendEvent(view.viewport(), &keyEvent);
+        totalDispatchUs += (timer.nsecsElapsed() / 1000);
+        QVERIFY(handled);
+    }
+
+    qreal avgDispatchMs = (totalDispatchUs / 1000.0) / typeSequence.length();
+
+    // Verify Telemetry counters: all 5 keystrokes hit the incremental fast paths!
+    QCOMPARE(view.incrementalParseHits(), initIncParseHits + 5);
+    QCOMPARE(view.incrementalProjectionHits(), initIncProjHits + 5);
+    QVERIFY(view.buffer().text().contains(QStringLiteral("ABCDE")));
+
+    // Measure Viewport Render latency
+    timer.restart();
+    QPixmap pixmap(1024, 768);
+    view.render(&pixmap);
+    qreal paintMs = (timer.nsecsElapsed() / 1000) / 1000.0;
+
+    qDebug() << "=== Probe 28: Large Document GUI Event Latency (500 KB) ===";
+    qDebug() << "  Avg Qt KeyPress Dispatch (Inc AST + In-Place Proj + Inc Layout):" << avgDispatchMs << "ms";
+    qDebug() << "  Qt Viewport Paint Latency (1024x768 Culling)                   :" << paintMs << "ms";
+    qDebug() << "  Total Interactive GUI Turnaround                               :" << (avgDispatchMs + paintMs) << "ms";
+    qDebug() << "  Telemetry:" << view.incrementalParseHits() << "IncParseHits |" << view.incrementalProjectionHits() << "IncProjHits";
+
+    // Strict performance assertions
+    QVERIFY(avgDispatchMs < 10.0); // Keystroke event dispatch under 10ms on 500 KB document
+    QVERIFY(paintMs < 100.0);       // Render under 100ms on headless CI
 }
 
 QTEST_MAIN(TestProbes)

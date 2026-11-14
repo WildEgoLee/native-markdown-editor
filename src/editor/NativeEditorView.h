@@ -64,6 +64,8 @@ public:
 
     quint64 incrementalParseHits() const { return m_incrementalParseHits; }
     quint64 fullParseFallbacks() const { return m_fullParseFallbacks; }
+    quint64 incrementalProjectionHits() const { return m_projection.incrementalHits(); }
+    quint64 fullProjectionFallbacks() const { return m_projection.fullFallbacks(); }
 
 signals:
     void cursorMoved(int line, int col, int offset);

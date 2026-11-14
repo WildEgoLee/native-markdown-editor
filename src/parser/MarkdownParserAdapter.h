@@ -33,7 +33,8 @@ public:
                                      int editOffset,
                                      int lengthRemoved,
                                      int lengthAdded,
-                                     int childIndex);
+                                     int childIndex,
+                                     bool *outSucceeded = nullptr);
 
 private:
     void initExtensions();

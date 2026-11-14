@@ -37,8 +37,8 @@ NativeEditorView::NativeEditorView(QWidget *parent)
         }
     });
 
-    connect(&m_buffer, &Core::TextBuffer::textChanged, this, [this]() {
-        reparseAndRelayout();
+    connect(&m_buffer, &Core::TextBuffer::textChanged, this, [this](int offset, int removed, int added) {
+        reparseAndRelayout(offset, removed, added);
         emit textChanged();
     });
 
@@ -105,9 +105,9 @@ void NativeEditorView::selectAll() {
     viewport()->update();
 }
 
-void NativeEditorView::reparseAndRelayout() {
+void NativeEditorView::reparseAndRelayout(int editOffset, int lengthRemoved, int lengthAdded) {
     m_rootNode = m_parser.parse(m_buffer);
-    m_projection.buildProjection(m_rootNode, m_buffer, m_cursorPos, m_isSourceMode);
+    m_projection.buildProjection(m_rootNode, m_buffer, m_cursorPos, m_isSourceMode, editOffset, lengthRemoved, lengthAdded);
     m_layoutEngine.layout(m_projection, qMax(200, viewport()->width()));
     updateScrollBars();
     viewport()->update();

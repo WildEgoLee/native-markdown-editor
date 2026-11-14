@@ -57,7 +57,10 @@ public:
     bool buildProjection(const Parser::SemanticNodePtr &rootNode,
                          const Core::TextBuffer &buffer,
                          int cursorPos,
-                         bool isSourceMode);
+                         bool isSourceMode,
+                         int editOffset = -1,
+                         int lengthRemoved = 0,
+                         int lengthAdded = 0);
 
     const QVector<VisualBlock> &blocks() const { return m_blocks; }
     int blockCount() const { return m_blocks.size(); }

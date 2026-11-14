@@ -310,4 +310,142 @@ SemanticNodePtr MarkdownParserAdapter::parse(const Core::TextBuffer &buffer) {
     return root;
 }
 
+bool MarkdownParserAdapter::canIncrementalParse(const SemanticNodePtr &previousRoot,
+                                                const Core::TextBuffer &buffer,
+                                                int editOffset,
+                                                int lengthRemoved,
+                                                const QString &insertText,
+                                                int &outChildIndex) const
+{
+    outChildIndex = -1;
+    if (!previousRoot || previousRoot->children.isEmpty()) {
+        return false;
+    }
+
+    // If inserted text contains double-newlines or major block-level triggers, fall back to full parse
+    if (insertText.contains(QStringLiteral("\n\n")) ||
+        insertText.contains(QStringLiteral("```")) ||
+        insertText.contains(QStringLiteral("> ")) ||
+        insertText.contains(QStringLiteral("- [ ]")) ||
+        insertText.contains(QStringLiteral("- [x]")) ||
+        insertText.contains(QStringLiteral("|")))
+    {
+        return false;
+    }
+
+    // Find top-level child that encloses this edit
+    int editEnd = editOffset + lengthRemoved;
+    for (int i = 0; i < previousRoot->children.size(); ++i) {
+        const auto &child = previousRoot->children[i];
+        if (editOffset >= child->fullRange.start && editEnd <= child->fullRange.end) {
+            // Safe leaf block types for local incremental parsing
+            if (child->type == NodeType::Paragraph) {
+                outChildIndex = i;
+                return true;
+            }
+            break;
+        }
+    }
+    return false;
+}
+
+SemanticNodePtr MarkdownParserAdapter::incrementalParse(const SemanticNodePtr &previousRoot,
+                                                         const Core::TextBuffer &buffer,
+                                                         int editOffset,
+                                                         int lengthRemoved,
+                                                         int lengthAdded,
+                                                         int childIndex)
+{
+    if (!previousRoot || childIndex < 0 || childIndex >= previousRoot->children.size()) {
+        return parse(buffer);
+    }
+
+    int delta = lengthAdded - lengthRemoved;
+    const auto &oldChild = previousRoot->children[childIndex];
+    int blockStart = oldChild->fullRange.start;
+    int blockLen = oldChild->fullRange.length() + delta;
+
+    if (blockStart < 0 || blockStart + blockLen > buffer.length()) {
+        return parse(buffer);
+    }
+
+    QString blockText = buffer.substring(blockStart, blockLen);
+    Core::TextBuffer snippetBuffer;
+    snippetBuffer.setText(blockText);
+
+    auto snippetRoot = parse(snippetBuffer);
+    if (!snippetRoot || snippetRoot->children.isEmpty()) {
+        return parse(buffer);
+    }
+
+    // Extract the parsed snippet block
+    SemanticNodePtr newChild = snippetRoot->children[0];
+
+    // Offset all ranges in newChild by +blockStart
+    auto offsetNode = [blockStart](auto self, const SemanticNodePtr &node) -> void {
+        if (!node) return;
+        node->fullRange.start += blockStart;
+        node->fullRange.end += blockStart;
+        node->contentRange.start += blockStart;
+        node->contentRange.end += blockStart;
+        if (node->prefixRange.isValid()) {
+            node->prefixRange.start += blockStart;
+            node->prefixRange.end += blockStart;
+        }
+        if (node->suffixRange.isValid()) {
+            node->suffixRange.start += blockStart;
+            node->suffixRange.end += blockStart;
+        }
+        for (const auto &c : node->children) {
+            self(self, c);
+        }
+    };
+    offsetNode(offsetNode, newChild);
+
+    // Create a new document root with updated bounds
+    auto newRoot = std::make_shared<SemanticNode>(*previousRoot);
+    newRoot->fullRange.end += delta;
+    newRoot->contentRange.end += delta;
+    newRoot->children.resize(previousRoot->children.size());
+
+    // Recursive helper to clone and shift subsequent nodes by delta
+    auto shiftNode = [delta](auto self, const SemanticNodePtr &src) -> SemanticNodePtr {
+        if (!src) return nullptr;
+        auto cloned = std::make_shared<SemanticNode>(*src);
+        cloned->fullRange.start += delta;
+        cloned->fullRange.end += delta;
+        cloned->contentRange.start += delta;
+        cloned->contentRange.end += delta;
+        if (cloned->prefixRange.isValid()) {
+            cloned->prefixRange.start += delta;
+            cloned->prefixRange.end += delta;
+        }
+        if (cloned->suffixRange.isValid()) {
+            cloned->suffixRange.start += delta;
+            cloned->suffixRange.end += delta;
+        }
+        if (cloned->taskCheckboxRange.isValid()) {
+            cloned->taskCheckboxRange.start += delta;
+            cloned->taskCheckboxRange.end += delta;
+        }
+        for (int c = 0; c < cloned->children.size(); ++c) {
+            cloned->children[c] = self(self, cloned->children[c]);
+        }
+        return cloned;
+    };
+
+    // Prefix children (0 .. childIndex - 1): unmodified shared pointers
+    for (int i = 0; i < childIndex; ++i) {
+        newRoot->children[i] = previousRoot->children[i];
+    }
+    // Edited child
+    newRoot->children[childIndex] = newChild;
+    // Suffix children (childIndex + 1 .. N - 1): clone with ranges shifted by delta
+    for (int i = childIndex + 1; i < previousRoot->children.size(); ++i) {
+        newRoot->children[i] = shiftNode(shiftNode, previousRoot->children[i]);
+    }
+
+    return newRoot;
+}
+
 } // namespace MarkdownTool::Parser

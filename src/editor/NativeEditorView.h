@@ -60,7 +60,7 @@ public:
     bool replaceOne(const QString &findStr, const QString &replaceStr, bool matchCase);
     int replaceAll(const QString &findStr, const QString &replaceStr, bool matchCase);
 
-    void reparseAndRelayout();
+    void reparseAndRelayout(int editOffset = -1, int lengthRemoved = 0, int lengthAdded = 0);
 
 signals:
     void cursorMoved(int line, int col, int offset);

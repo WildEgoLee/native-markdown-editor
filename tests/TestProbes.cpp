@@ -13,6 +13,7 @@
 #include "parser/MarkdownParserAdapter.h"
 #include "mapping/DisplayProjection.h"
 #include "editor/LayoutEngine.h"
+#include "editor/NativeEditorView.h"
 #include "file/FileService.h"
 #include "file/DocumentSession.h"
 
@@ -44,6 +45,9 @@ private slots:
     void testIncrementalAndColdLayoutEquivalence();
     void testWindowWidthChangeReflow();
     void testCacheHitPreservesBlockLayoutIdentity();
+    void testDocumentScalePerformanceMatrix();
+    void testIncrementalAstParseAndProjectionEquivalence();
+    void testGuiEventDrivenInputLatency();
 };
 
 // Probe 1: UTF-8 BOM, CRLF, trailing spaces, no-newline exact byte-for-byte invariance
@@ -704,9 +708,9 @@ void TestProbes::testPerformanceBaselineAndLatency() {
         qreal tParse = timer.nsecsElapsed() / 1000000.0;
         parseSamples.append(tParse);
 
-        // Tier 2: Measure Projection build
+        // Tier 2: Measure Projection build (with dirty block reconstruction)
         timer.restart();
-        bool projChanged = liveProjection.buildProjection(curRoot, liveBuffer, editOffset, false);
+        bool projChanged = liveProjection.buildProjection(curRoot, liveBuffer, editOffset, false, editOffset, 1, 1);
         qreal tProj = timer.nsecsElapsed() / 1000000.0;
         projSamples.append(tProj);
         QVERIFY(projChanged);
@@ -765,8 +769,9 @@ void TestProbes::testPerformanceBaselineAndLatency() {
     qDebug() << "  Incremental Layout            : p50 =" << incStats.p50 << "ms | p95 =" << incStats.p95 << "ms | mean =" << incStats.mean << "ms";
     qDebug() << "  Viewport Paint (1080p Culling): p50 =" << paintStats.p50 << "ms | p95 =" << paintStats.p95 << "ms | mean =" << paintStats.mean << "ms";
     qDebug() << "-------------------------------------------------------------------------------------";
-    qDebug() << "[Tier 3: End-to-End Keypress Interaction Latency (Parse + Proj + IncLayout + Paint)]";
-    qDebug() << "  E2E Keypress Latency (N=30)   : p50 =" << e2eStats.p50 << "ms | p95 =" << e2eStats.p95 << "ms | mean =" << e2eStats.mean << "ms (min:" << e2eStats.min << "ms, max:" << e2eStats.max << "ms)";
+    qDebug() << "[Tier 3: Simulated Document Edit Pipeline Latency (Parse + Proj + IncLayout + Paint)]";
+    qDebug() << "  Simulated Pipeline Latency (N=30) : p50 =" << e2eStats.p50 << "ms | p95 =" << e2eStats.p95 << "ms | mean =" << e2eStats.mean << "ms (min:" << e2eStats.min << "ms, max:" << e2eStats.max << "ms)";
+    qDebug() << "  (Note: Excludes OS/Qt window manager event loop & hardware display VSync; real GUI latency measured in Probe 25)";
     qDebug() << "  Cursor Nav Projection Check   :" << cursorNavTimeNs / 1000.0 << "us (Unchanged:" << !changedNormal << ")";
     qDebug() << "  HitTest (Binary Search)       :" << hitTestTimeUs << "us";
     qDebug() << "=====================================================================================";
@@ -1230,6 +1235,231 @@ void TestProbes::testCacheHitPreservesBlockLayoutIdentity() {
     // Suffix blocks 3 and 4 MUST preserve their original QTextLayout pointers (100% cache hit, zero text shaping)
     QCOMPARE(engine.blocks()[3].layout.get(), originalPointers[3]);
     QCOMPARE(engine.blocks()[4].layout.get(), originalPointers[4]);
+}
+
+// Probe 23: Document Scale Performance Matrix (100 KB, 1 MB, 3 MB)
+void TestProbes::testDocumentScalePerformanceMatrix() {
+    Parser::MarkdownParserAdapter parser;
+
+    auto benchmarkScale = [&](int numChapters, const QString &scaleLabel) {
+        QString doc;
+        doc.reserve(numChapters * 450);
+        for (int i = 0; i < numChapters; ++i) {
+            doc.append(QStringLiteral("## 章节 %1: 性能规模扩展评估\n\n").arg(i + 1));
+            doc.append(QStringLiteral("测试原生排版引擎与增量解析流水线在大规模文档下的伸缩能力与内存表现。\n\n"));
+            doc.append(QStringLiteral("- 列表项一：包含部分行内样式测试\n- 列表项二：另一段较长的文本，用来测试列表项\n\n"));
+            doc.append(QStringLiteral("```cpp\nint fn_%1() { return %1; }\n```\n\n").arg(i + 1));
+        }
+
+        int byteSize = doc.toUtf8().size();
+        Core::TextBuffer buffer;
+        buffer.setText(doc);
+
+        QElapsedTimer timer;
+
+        // 1. Cold Parse
+        timer.restart();
+        auto root = parser.parse(buffer);
+        qreal coldParseMs = timer.nsecsElapsed() / 1000000.0;
+        QVERIFY(root != nullptr);
+
+        // 2. Cold Projection
+        Mapping::DisplayProjection proj;
+        timer.restart();
+        proj.buildProjection(root, buffer, 0, false);
+        qreal coldProjMs = timer.nsecsElapsed() / 1000000.0;
+        int blockCount = proj.blockCount();
+
+        // 3. Cold Layout
+        Editor::LayoutEngine engine;
+        timer.restart();
+        engine.layout(proj, 800.0);
+        qreal coldLayoutMs = timer.nsecsElapsed() / 1000000.0;
+
+        // 4. Incremental Edit: Modify one character in a middle paragraph
+        int editOffset = doc.indexOf(QStringLiteral("伸缩能力"));
+        if (editOffset < 0) editOffset = 100;
+        buffer.replace(editOffset, 2, QStringLiteral("弹性"));
+
+        // Incremental AST Parse (if supported) vs Cold
+        int childIdx = -1;
+        qreal incParseMs = 0;
+        Parser::SemanticNodePtr editedRoot;
+        if (parser.canIncrementalParse(root, buffer, editOffset, 2, QStringLiteral("弹性"), childIdx)) {
+            timer.restart();
+            editedRoot = parser.incrementalParse(root, buffer, editOffset, 2, 2, childIdx);
+            incParseMs = timer.nsecsElapsed() / 1000000.0;
+        } else {
+            timer.restart();
+            editedRoot = parser.parse(buffer);
+            incParseMs = timer.nsecsElapsed() / 1000000.0;
+        }
+
+        // Incremental Projection with Dirty Block Reconstruction
+        timer.restart();
+        proj.buildProjection(editedRoot, buffer, editOffset, false, editOffset, 2, 2);
+        qreal incProjMs = timer.nsecsElapsed() / 1000000.0;
+
+        // Incremental Layout
+        timer.restart();
+        engine.layout(proj, 800.0);
+        qreal incLayoutMs = timer.nsecsElapsed() / 1000000.0;
+
+        // Viewport Paint (1080p culling)
+        QImage vpImg(1920, 1080, QImage::Format_ARGB32_Premultiplied);
+        QPainter painter(&vpImg);
+        timer.restart();
+        engine.paint(&painter, QRectF(0, 500.0, 800.0, 1080.0), proj, -1, -1);
+        painter.end();
+        qreal vpPaintMs = timer.nsecsElapsed() / 1000000.0;
+
+        qDebug().noquote() << QStringLiteral("| %1 | %2 KB | %3 | %4 ms | %5 ms | %6 ms | %7 ms | %8 ms | %9 ms | %10 ms |")
+            .arg(scaleLabel, -7)
+            .arg(byteSize / 1024, 7)
+            .arg(blockCount, 7)
+            .arg(coldParseMs, 7, 'f', 1)
+            .arg(incParseMs, 7, 'f', 2)
+            .arg(coldProjMs, 7, 'f', 1)
+            .arg(incProjMs, 7, 'f', 2)
+            .arg(coldLayoutMs, 7, 'f', 1)
+            .arg(incLayoutMs, 7, 'f', 2)
+            .arg(vpPaintMs, 7, 'f', 2);
+    };
+
+    qDebug() << "\n=========================================== Document Scale Performance Matrix ===========================================";
+    qDebug() << "| Scale   | Doc Size| Blocks  | ColdParse | IncParse  | ColdProj  | IncProj   | ColdLayout| IncLayout | ViewportPaint|";
+    qDebug() << "|---------|---------|---------|-----------|-----------|-----------|-----------|-----------|-----------|--------------|";
+    benchmarkScale(250, QStringLiteral("100 KB"));   // ~115 KB, ~1500 blocks
+    benchmarkScale(2200, QStringLiteral("1.0 MB"));  // ~1.0 MB, ~13,200 blocks
+    benchmarkScale(5000, QStringLiteral("2.5 MB"));  // ~2.5 MB, ~30,000 blocks
+    qDebug() << "=========================================================================================================================\n";
+}
+
+// Probe 24: Mathematical Equivalence between Incremental AST Parse / Dirty Block Projection and Cold Full Parse / Projection
+void TestProbes::testIncrementalAstParseAndProjectionEquivalence() {
+    Parser::MarkdownParserAdapter parser;
+
+    Core::TextBuffer buffer;
+    buffer.setText(QStringLiteral(
+        "# 顶层标题\n\n"
+        "这是第一段正文，包含普通文字与测试信息。\n\n"
+        "这是第二段正文，包含了**重要粗体**与*关键斜体*的内容。\n\n"
+        "这是第三段正文，保持不变以验证前缀与后缀的精确复用。\n\n"
+        "- [x] 任务项一已完成\n"
+        "- [ ] 任务项二进行中\n"
+    ));
+
+    // 1. Initial base parse and projection
+    auto baseRoot = parser.parse(buffer);
+    QVERIFY(baseRoot != nullptr);
+    QCOMPARE(baseRoot->children.size(), 5);
+
+    Mapping::DisplayProjection baseProj;
+    baseProj.buildProjection(baseRoot, buffer, 0, false);
+    QCOMPARE(baseProj.blockCount(), 6);
+
+    // 2. Perform a local in-paragraph keystroke edit in paragraph 2:
+    // Replace "重要粗体" with "升级强化粗体"
+    int editPos = buffer.text().indexOf(QStringLiteral("重要粗体"));
+    QVERIFY(editPos > 0);
+    int removeLen = 4;
+    QString insertStr = QStringLiteral("升级强化粗体");
+    int insertLen = insertStr.length();
+    buffer.replace(editPos, removeLen, insertStr);
+
+    // 3. Verify canIncrementalParse recognizes the minimal affected semantic region
+    int childIdx = -1;
+    bool canInc = parser.canIncrementalParse(baseRoot, buffer, editPos, removeLen, insertStr, childIdx);
+    QVERIFY(canInc);
+    QCOMPARE(childIdx, 2); // Paragraph 2 is index 2
+
+    // 4. Run incremental AST parse
+    auto incRoot = parser.incrementalParse(baseRoot, buffer, editPos, removeLen, insertLen, childIdx);
+    QVERIFY(incRoot != nullptr);
+
+    // 5. Run cold full AST parse on the exact same buffer
+    auto coldRoot = parser.parse(buffer);
+    QVERIFY(coldRoot != nullptr);
+
+    // 6. Assert mathematical equivalence between incRoot and coldRoot
+    QCOMPARE(incRoot->children.size(), coldRoot->children.size());
+    for (int i = 0; i < incRoot->children.size(); ++i) {
+        const auto &incChild = incRoot->children[i];
+        const auto &coldChild = coldRoot->children[i];
+        QCOMPARE(incChild->type, coldChild->type);
+        QCOMPARE(incChild->fullRange.start, coldChild->fullRange.start);
+        QCOMPARE(incChild->fullRange.end, coldChild->fullRange.end);
+        QCOMPARE(incChild->contentRange.start, coldChild->contentRange.start);
+        QCOMPARE(incChild->contentRange.end, coldChild->contentRange.end);
+        QCOMPARE(incChild->headingLevel, coldChild->headingLevel);
+        QCOMPARE(incChild->children.size(), coldChild->children.size());
+    }
+
+    // 7. Test Incremental Projection with Dirty Block Reconstruction
+    Mapping::DisplayProjection incProj = baseProj;
+    bool incChanged = incProj.buildProjection(incRoot, buffer, editPos + insertLen, false, editPos, removeLen, insertLen);
+    QVERIFY(incChanged);
+
+    // 8. Test Cold Projection on fresh instance
+    Mapping::DisplayProjection coldProj;
+    bool coldChanged = coldProj.buildProjection(coldRoot, buffer, editPos + insertLen, false);
+    QVERIFY(coldChanged);
+
+    // 9. Assert mathematical equivalence between incProj and coldProj blocks
+    QCOMPARE(incProj.blockCount(), coldProj.blockCount());
+    for (int i = 0; i < incProj.blockCount(); ++i) {
+        const auto &bInc = incProj.blocks()[i];
+        const auto &bCold = coldProj.blocks()[i];
+        QCOMPARE(bInc.visualText, bCold.visualText);
+        QCOMPARE(bInc.sourceRange.start, bCold.sourceRange.start);
+        QCOMPARE(bInc.sourceRange.end, bCold.sourceRange.end);
+        QCOMPARE(bInc.blockType, bCold.blockType);
+        QCOMPARE(bInc.headingLevel, bCold.headingLevel);
+        QCOMPARE(bInc.segments.size(), bCold.segments.size());
+        for (int s = 0; s < bInc.segments.size(); ++s) {
+            const auto &sInc = bInc.segments[s];
+            const auto &sCold = bCold.segments[s];
+            QCOMPARE(sInc.visualStart, sCold.visualStart);
+            QCOMPARE(sInc.visualLength, sCold.visualLength);
+            QCOMPARE(sInc.sourceRange.start, sCold.sourceRange.start);
+            QCOMPARE(sInc.sourceRange.end, sCold.sourceRange.end);
+            QCOMPARE(sInc.format, sCold.format);
+        }
+    }
+}
+
+// Probe 25: Qt GUI Event-Driven Input and Repaint Latency
+void TestProbes::testGuiEventDrivenInputLatency() {
+    Editor::NativeEditorView view;
+    view.resize(1024, 768);
+    view.buffer().setText(QStringLiteral("# 原生 Markdown 窗口输入测试\n\n测试由 Qt 事件系统驱动的实际按键输入与绘制延迟。\n"));
+    view.setCursorPos(35); // in the body
+
+    // 1. Dispatch real Qt KeyPress event through Qt event system
+    QElapsedTimer eventTimer;
+    eventTimer.start();
+
+    QKeyEvent keyEvent(QEvent::KeyPress, Qt::Key_A, Qt::NoModifier, QStringLiteral("A"));
+    bool handled = QApplication::sendEvent(view.viewport(), &keyEvent);
+    qint64 eventDispatchUs = eventTimer.nsecsElapsed() / 1000;
+
+    QVERIFY(handled);
+    QVERIFY(view.buffer().text().contains(QStringLiteral("A")));
+
+    // 2. Trigger real Qt Viewport render
+    eventTimer.restart();
+    QPixmap pixmap(1024, 768);
+    view.render(&pixmap);
+    qint64 paintUs = eventTimer.nsecsElapsed() / 1000;
+
+    qDebug() << "=== Probe 25: Qt GUI Event-Driven Latency ===";
+    qDebug() << "  Qt KeyPress Event Dispatch (Input -> Transaction -> Buffer -> Layout):" << eventDispatchUs / 1000.0 << "ms";
+    qDebug() << "  Qt Viewport Paint Event Execution                                    :" << paintUs / 1000.0 << "ms";
+    qDebug() << "  Total Interactive GUI Turnaround                                    :" << (eventDispatchUs + paintUs) / 1000.0 << "ms";
+
+    // Assert responsiveness limits
+    QVERIFY(eventDispatchUs < 30 * 1000); // Under 30ms
+    QVERIFY(paintUs < 20 * 1000);         // Under 20ms
 }
 
 QTEST_MAIN(TestProbes)

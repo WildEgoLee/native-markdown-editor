@@ -280,9 +280,12 @@ static void applyInlineStyles(const Parser::SemanticNodePtr &inlineNode,
 }
 
 bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
-                                       const Core::TextBuffer &buffer,
-                                       int cursorPos,
-                                       bool isSourceMode)
+                                        const Core::TextBuffer &buffer,
+                                        int cursorPos,
+                                        bool isSourceMode,
+                                        int editOffset,
+                                        int lengthRemoved,
+                                        int lengthAdded)
 {
     QVector<VisualBlock> prevBlocks = std::move(m_blocks);
     m_blocks.clear();
@@ -388,9 +391,54 @@ bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
         return checkChanged();
     }
 
-    // Traverse root children
-    for (const auto &child : rootNode->children) {
-        processBlockNode(child, buffer, cursorPos, isSourceMode);
+    // Traverse root children (with dirty-block reconstruction if edit region provided)
+    const int N = rootNode->children.size();
+    int delta = lengthAdded - lengthRemoved;
+    if (editOffset >= 0 && !prevBlocks.isEmpty() && !isSourceMode && N == prevBlocks.size()) {
+        m_blocks.reserve(N);
+        for (int i = 0; i < N; ++i) {
+            const auto &child = rootNode->children[i];
+            const auto &prev = prevBlocks[i];
+
+            bool hasCursorNow = child->fullRange.contains(cursorPos);
+            bool hadCursorBefore = prev.sourceRange.contains(cursorPos);
+
+            // 1. Prefix: strictly before the edit and not affected by cursor marker toggles
+            if (child->fullRange.end < editOffset && !hasCursorNow && !hadCursorBefore && child->fullRange == prev.sourceRange) {
+                m_blocks.append(prev);
+                continue;
+            }
+
+            // 2. Suffix: strictly after the edit and not affected by cursor marker toggles
+            if (child->fullRange.start > (editOffset + lengthAdded) && !hasCursorNow && !hadCursorBefore &&
+                child->fullRange.start == prev.sourceRange.start + delta &&
+                child->fullRange.end == prev.sourceRange.end + delta)
+            {
+                VisualBlock shifted = prev;
+                shifted.sourceRange.start += delta;
+                shifted.sourceRange.end += delta;
+                for (auto &seg : shifted.segments) {
+                    if (seg.sourceRange.isValid()) {
+                        seg.sourceRange.start += delta;
+                        seg.sourceRange.end += delta;
+                    }
+                }
+                if (shifted.checkboxSourceRange.isValid()) {
+                    shifted.checkboxSourceRange.start += delta;
+                    shifted.checkboxSourceRange.end += delta;
+                }
+                m_blocks.append(std::move(shifted));
+                continue;
+            }
+
+            // 3. Dirty block: process through normal AST-to-visual transformation
+            processBlockNode(child, buffer, cursorPos, isSourceMode);
+        }
+    } else {
+        // Fallback: full traversal
+        for (const auto &child : rootNode->children) {
+            processBlockNode(child, buffer, cursorPos, isSourceMode);
+        }
     }
 
     if (m_blocks.isEmpty()) {

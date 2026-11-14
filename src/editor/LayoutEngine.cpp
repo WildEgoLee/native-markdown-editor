@@ -188,7 +188,7 @@ void LayoutEngine::layout(const Mapping::DisplayProjection &projection,
         return;
     }
 
-    bool canReuse = (m_lastWidth > 0 && qAbs(contentWidth - m_lastWidth) < 1.0 && !m_blocks.isEmpty());
+    bool canReuse = (m_lastWidth > 0 && qFuzzyCompare(contentWidth, m_lastWidth) && !m_blocks.isEmpty());
     m_lastWidth = contentWidth;
 
     const int N = vBlocks.size();

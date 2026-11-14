@@ -1257,6 +1257,9 @@ void TestProbes::testDocumentScalePerformanceMatrix() {
 
         QElapsedTimer timer;
 
+        int editOffset = doc.indexOf(QStringLiteral("伸缩能力"));
+        if (editOffset < 0) editOffset = 100;
+
         // 1. Cold Parse
         timer.restart();
         auto root = parser.parse(buffer);
@@ -1266,7 +1269,7 @@ void TestProbes::testDocumentScalePerformanceMatrix() {
         // 2. Cold Projection
         Mapping::DisplayProjection proj;
         timer.restart();
-        proj.buildProjection(root, buffer, 0, false);
+        proj.buildProjection(root, buffer, editOffset, false);
         qreal coldProjMs = timer.nsecsElapsed() / 1000000.0;
         int blockCount = proj.blockCount();
 
@@ -1277,8 +1280,6 @@ void TestProbes::testDocumentScalePerformanceMatrix() {
         qreal coldLayoutMs = timer.nsecsElapsed() / 1000000.0;
 
         // 4. Incremental Edit: Modify one character in a middle paragraph
-        int editOffset = doc.indexOf(QStringLiteral("伸缩能力"));
-        if (editOffset < 0) editOffset = 100;
         buffer.replace(editOffset, 2, QStringLiteral("弹性"));
 
         // Incremental AST Parse (if supported) vs Cold
@@ -1297,7 +1298,7 @@ void TestProbes::testDocumentScalePerformanceMatrix() {
 
         // Incremental Projection with Dirty Block Reconstruction
         timer.restart();
-        proj.buildProjection(editedRoot, buffer, editOffset, false, editOffset, 2, 2);
+        proj.buildProjection(editedRoot, buffer, editOffset + 2, false, editOffset, 2, 2);
         qreal incProjMs = timer.nsecsElapsed() / 1000000.0;
 
         // Incremental Layout
@@ -1336,6 +1337,71 @@ void TestProbes::testDocumentScalePerformanceMatrix() {
 }
 
 // Probe 24: Mathematical Equivalence between Incremental AST Parse / Dirty Block Projection and Cold Full Parse / Projection
+static void assertSemanticNodesDeepEqual(const Parser::SemanticNodePtr &a, const Parser::SemanticNodePtr &b) {
+    QVERIFY(a != nullptr);
+    QVERIFY(b != nullptr);
+    QCOMPARE(a->type, b->type);
+    QCOMPARE(a->headingLevel, b->headingLevel);
+    QCOMPARE(a->isTaskChecked, b->isTaskChecked);
+    QCOMPARE(a->isTaskItem, b->isTaskItem);
+    QCOMPARE(a->codeLanguage, b->codeLanguage);
+    QCOMPARE(a->linkUrl, b->linkUrl);
+    QCOMPARE(a->linkTitle, b->linkTitle);
+    QCOMPARE(a->fullRange.start, b->fullRange.start);
+    QCOMPARE(a->fullRange.end, b->fullRange.end);
+    QCOMPARE(a->contentRange.start, b->contentRange.start);
+    QCOMPARE(a->contentRange.end, b->contentRange.end);
+    if (!a->prefixRange.isEmpty() || !b->prefixRange.isEmpty()) {
+        QCOMPARE(a->prefixRange.start, b->prefixRange.start);
+        QCOMPARE(a->prefixRange.end, b->prefixRange.end);
+    }
+    if (!a->suffixRange.isEmpty() || !b->suffixRange.isEmpty()) {
+        QCOMPARE(a->suffixRange.start, b->suffixRange.start);
+        QCOMPARE(a->suffixRange.end, b->suffixRange.end);
+    }
+    if (a->isTaskItem || b->isTaskItem) {
+        QCOMPARE(a->taskCheckboxRange.start, b->taskCheckboxRange.start);
+        QCOMPARE(a->taskCheckboxRange.end, b->taskCheckboxRange.end);
+    }
+    QCOMPARE(a->children.size(), b->children.size());
+    for (int i = 0; i < a->children.size(); ++i) {
+        assertSemanticNodesDeepEqual(a->children[i], b->children[i]);
+    }
+}
+
+static void assertVisualBlocksDeepEqual(const QVector<Mapping::VisualBlock> &a, const QVector<Mapping::VisualBlock> &b) {
+    QCOMPARE(a.size(), b.size());
+    for (int i = 0; i < a.size(); ++i) {
+        const auto &b1 = a[i];
+        const auto &b2 = b[i];
+        QCOMPARE(b1.visualText, b2.visualText);
+        QCOMPARE(b1.sourceRange.start, b2.sourceRange.start);
+        QCOMPARE(b1.sourceRange.end, b2.sourceRange.end);
+        QCOMPARE(b1.blockType, b2.blockType);
+        QCOMPARE(b1.headingLevel, b2.headingLevel);
+        QCOMPARE(b1.indentLevel, b2.indentLevel);
+        QCOMPARE(b1.isQuote, b2.isQuote);
+        QCOMPARE(b1.isCodeBlock, b2.isCodeBlock);
+        QCOMPARE(b1.isTaskItem, b2.isTaskItem);
+        QCOMPARE(b1.isTaskChecked, b2.isTaskChecked);
+        if (b1.isTaskItem || b2.isTaskItem) {
+            QCOMPARE(b1.checkboxSourceRange.start, b2.checkboxSourceRange.start);
+            QCOMPARE(b1.checkboxSourceRange.end, b2.checkboxSourceRange.end);
+        }
+        QCOMPARE(b1.segments.size(), b2.segments.size());
+        for (int s = 0; s < b1.segments.size(); ++s) {
+            const auto &s1 = b1.segments[s];
+            const auto &s2 = b2.segments[s];
+            QCOMPARE(s1.visualStart, s2.visualStart);
+            QCOMPARE(s1.visualLength, s2.visualLength);
+            QCOMPARE(s1.sourceRange.start, s2.sourceRange.start);
+            QCOMPARE(s1.sourceRange.end, s2.sourceRange.end);
+            QCOMPARE(s1.type, s2.type);
+            QCOMPARE(s1.format, s2.format);
+        }
+    }
+}
+
 void TestProbes::testIncrementalAstParseAndProjectionEquivalence() {
     Parser::MarkdownParserAdapter parser;
 
@@ -1349,83 +1415,97 @@ void TestProbes::testIncrementalAstParseAndProjectionEquivalence() {
         "- [ ] 任务项二进行中\n"
     ));
 
-    // 1. Initial base parse and projection
+    // 1. Initial base parse and projection (cursor situated inside paragraph 2)
+    int editPos = buffer.text().indexOf(QStringLiteral("重要粗体"));
+    QVERIFY(editPos > 0);
+
     auto baseRoot = parser.parse(buffer);
     QVERIFY(baseRoot != nullptr);
     QCOMPARE(baseRoot->children.size(), 5);
 
     Mapping::DisplayProjection baseProj;
-    baseProj.buildProjection(baseRoot, buffer, 0, false);
+    baseProj.buildProjection(baseRoot, buffer, editPos, false);
     QCOMPARE(baseProj.blockCount(), 6);
 
-    // 2. Perform a local in-paragraph keystroke edit in paragraph 2:
-    // Replace "重要粗体" with "升级强化粗体"
-    int editPos = buffer.text().indexOf(QStringLiteral("重要粗体"));
-    QVERIFY(editPos > 0);
+    // =========================================================================
+    // Round 1: Fast Path Single Keystroke Edit inside Paragraph 2
+    // =========================================================================
     int removeLen = 4;
     QString insertStr = QStringLiteral("升级强化粗体");
     int insertLen = insertStr.length();
     buffer.replace(editPos, removeLen, insertStr);
 
-    // 3. Verify canIncrementalParse recognizes the minimal affected semantic region
     int childIdx = -1;
     bool canInc = parser.canIncrementalParse(baseRoot, buffer, editPos, removeLen, insertStr, childIdx);
     QVERIFY(canInc);
     QCOMPARE(childIdx, 2); // Paragraph 2 is index 2
 
-    // 4. Run incremental AST parse
     auto incRoot = parser.incrementalParse(baseRoot, buffer, editPos, removeLen, insertLen, childIdx);
     QVERIFY(incRoot != nullptr);
 
-    // 5. Run cold full AST parse on the exact same buffer
     auto coldRoot = parser.parse(buffer);
     QVERIFY(coldRoot != nullptr);
 
-    // 6. Assert mathematical equivalence between incRoot and coldRoot
-    QCOMPARE(incRoot->children.size(), coldRoot->children.size());
-    for (int i = 0; i < incRoot->children.size(); ++i) {
-        const auto &incChild = incRoot->children[i];
-        const auto &coldChild = coldRoot->children[i];
-        QCOMPARE(incChild->type, coldChild->type);
-        QCOMPARE(incChild->fullRange.start, coldChild->fullRange.start);
-        QCOMPARE(incChild->fullRange.end, coldChild->fullRange.end);
-        QCOMPARE(incChild->contentRange.start, coldChild->contentRange.start);
-        QCOMPARE(incChild->contentRange.end, coldChild->contentRange.end);
-        QCOMPARE(incChild->headingLevel, coldChild->headingLevel);
-        QCOMPARE(incChild->children.size(), coldChild->children.size());
-    }
+    // Assert recursive deep AST equivalence
+    assertSemanticNodesDeepEqual(incRoot, coldRoot);
 
-    // 7. Test Incremental Projection with Dirty Block Reconstruction
+    // Incremental Projection with In-Place Dirty Block Update
     Mapping::DisplayProjection incProj = baseProj;
     bool incChanged = incProj.buildProjection(incRoot, buffer, editPos + insertLen, false, editPos, removeLen, insertLen);
     QVERIFY(incChanged);
 
-    // 8. Test Cold Projection on fresh instance
+    // Cold Projection
     Mapping::DisplayProjection coldProj;
     bool coldChanged = coldProj.buildProjection(coldRoot, buffer, editPos + insertLen, false);
     QVERIFY(coldChanged);
 
-    // 9. Assert mathematical equivalence between incProj and coldProj blocks
-    QCOMPARE(incProj.blockCount(), coldProj.blockCount());
-    for (int i = 0; i < incProj.blockCount(); ++i) {
-        const auto &bInc = incProj.blocks()[i];
-        const auto &bCold = coldProj.blocks()[i];
-        QCOMPARE(bInc.visualText, bCold.visualText);
-        QCOMPARE(bInc.sourceRange.start, bCold.sourceRange.start);
-        QCOMPARE(bInc.sourceRange.end, bCold.sourceRange.end);
-        QCOMPARE(bInc.blockType, bCold.blockType);
-        QCOMPARE(bInc.headingLevel, bCold.headingLevel);
-        QCOMPARE(bInc.segments.size(), bCold.segments.size());
-        for (int s = 0; s < bInc.segments.size(); ++s) {
-            const auto &sInc = bInc.segments[s];
-            const auto &sCold = bCold.segments[s];
-            QCOMPARE(sInc.visualStart, sCold.visualStart);
-            QCOMPARE(sInc.visualLength, sCold.visualLength);
-            QCOMPARE(sInc.sourceRange.start, sCold.sourceRange.start);
-            QCOMPARE(sInc.sourceRange.end, sCold.sourceRange.end);
-            QCOMPARE(sInc.format, sCold.format);
-        }
-    }
+    // Assert deep VisualBlock and VisualSegment equivalence
+    assertVisualBlocksDeepEqual(incProj.blocks(), coldProj.blocks());
+
+    // =========================================================================
+    // Round 2: Sequential Keystroke Append inside the same Paragraph
+    // =========================================================================
+    int editPos2 = editPos + insertLen;
+    QString insertStr2 = QStringLiteral("及扩展说明");
+    int insertLen2 = insertStr2.length();
+    buffer.replace(editPos2, 0, insertStr2);
+
+    int childIdx2 = -1;
+    bool canInc2 = parser.canIncrementalParse(incRoot, buffer, editPos2, 0, insertStr2, childIdx2);
+    QVERIFY(canInc2);
+    QCOMPARE(childIdx2, 2);
+
+    auto incRoot2 = parser.incrementalParse(incRoot, buffer, editPos2, 0, insertLen2, childIdx2);
+    auto coldRoot2 = parser.parse(buffer);
+    assertSemanticNodesDeepEqual(incRoot2, coldRoot2);
+
+    bool incChanged2 = incProj.buildProjection(incRoot2, buffer, editPos2 + insertLen2, false, editPos2, 0, insertLen2);
+    QVERIFY(incChanged2);
+
+    Mapping::DisplayProjection coldProj2;
+    coldProj2.buildProjection(coldRoot2, buffer, editPos2 + insertLen2, false);
+    assertVisualBlocksDeepEqual(incProj.blocks(), coldProj2.blocks());
+
+    // =========================================================================
+    // Round 3: Inter-block Cursor Navigation / Edit Fallback Safety
+    // (Edit performed with cursor originating from block 0 heading, jumping to paragraph)
+    // =========================================================================
+    Mapping::DisplayProjection jumpProj;
+    jumpProj.buildProjection(coldRoot2, buffer, 0, false); // cursor at heading 0
+
+    // Now edit in paragraph 2 with cursor landing in paragraph 2
+    int editPos3 = buffer.text().indexOf(QStringLiteral("测试信息"));
+    QVERIFY(editPos3 > 0);
+    buffer.replace(editPos3, 4, QStringLiteral("完全核验"));
+
+    auto coldRoot3 = parser.parse(buffer);
+    // Because previous cursor was in block 0 and new cursor is in block 1, jumpProj safely triggers fallback path
+    bool jumpChanged = jumpProj.buildProjection(coldRoot3, buffer, editPos3 + 4, false, editPos3, 4, 4);
+    QVERIFY(jumpChanged);
+
+    Mapping::DisplayProjection coldProj3;
+    coldProj3.buildProjection(coldRoot3, buffer, editPos3 + 4, false);
+    assertVisualBlocksDeepEqual(jumpProj.blocks(), coldProj3.blocks());
 }
 
 // Probe 25: Qt GUI Event-Driven Input and Repaint Latency
@@ -1446,6 +1526,16 @@ void TestProbes::testGuiEventDrivenInputLatency() {
     QVERIFY(handled);
     QVERIFY(view.buffer().text().contains(QStringLiteral("A")));
 
+    // Telemetry Verification: verify real GUI keystroke edit successfully executed via incremental AST parse!
+    QVERIFY(view.incrementalParseHits() > 0);
+
+    // Sequential second keypress 'B' to verify hit counter increments
+    quint64 hitsBefore = view.incrementalParseHits();
+    QKeyEvent keyEvent2(QEvent::KeyPress, Qt::Key_B, Qt::NoModifier, QStringLiteral("B"));
+    QApplication::sendEvent(view.viewport(), &keyEvent2);
+    QCOMPARE(view.incrementalParseHits(), hitsBefore + 1);
+    QVERIFY(view.buffer().text().contains(QStringLiteral("AB")));
+
     // 2. Trigger real Qt Viewport render
     eventTimer.restart();
     QPixmap pixmap(1024, 768);
@@ -1456,6 +1546,7 @@ void TestProbes::testGuiEventDrivenInputLatency() {
     qDebug() << "  Qt KeyPress Event Dispatch (Input -> Transaction -> Buffer -> Layout):" << eventDispatchUs / 1000.0 << "ms";
     qDebug() << "  Qt Viewport Paint Event Execution                                    :" << paintUs / 1000.0 << "ms";
     qDebug() << "  Total Interactive GUI Turnaround                                    :" << (eventDispatchUs + paintUs) / 1000.0 << "ms";
+    qDebug() << "  Incremental Parse Hits:" << view.incrementalParseHits() << "| Full Parse Fallbacks:" << view.fullParseFallbacks();
 
     // Assert responsiveness limits
     QVERIFY(eventDispatchUs < 30 * 1000); // Under 30ms

@@ -287,10 +287,111 @@ bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
                                         int lengthRemoved,
                                         int lengthAdded)
 {
+    // Fast path: In-Place Dirty Block Projection
+    // When a single localized text edit occurs within a block and does not alter document-wide structure,
+    // update only the affected visual block and shift suffix source ranges in O(affected) time.
+    if (editOffset >= 0 && !m_blocks.isEmpty() && !isSourceMode && rootNode && !buffer.isEmpty() && m_lastCursorPos >= 0) {
+        int dirtyIdx = findBlockIndexBySourceOffset(editOffset);
+        if (dirtyIdx > 0 && (dirtyIdx >= m_blocks.size() || editOffset < m_blocks[dirtyIdx].sourceRange.start)) {
+            if (editOffset <= m_blocks[dirtyIdx - 1].sourceRange.end) {
+                dirtyIdx = dirtyIdx - 1;
+            }
+        }
+
+        int prevCursorBlockIdx = findBlockIndexBySourceOffset(m_lastCursorPos);
+        int newCursorBlockIdx = findBlockIndexBySourceOffset(cursorPos);
+
+        // Crucial safety check: Fast path is only valid if both previous cursor and current cursor
+        // belong to the dirty block! If cursor moved into or out of another block, syntax markers
+        // in that other block may need to show/hide, requiring full projection.
+        if (dirtyIdx >= 0 && dirtyIdx < m_blocks.size() &&
+            prevCursorBlockIdx == dirtyIdx && newCursorBlockIdx == dirtyIdx)
+        {
+            const auto &curBlock = m_blocks[dirtyIdx];
+            if (editOffset >= curBlock.sourceRange.start && (editOffset + lengthRemoved) <= curBlock.sourceRange.end) {
+                // Find matching AST node in rootNode->children using binary search
+                auto it = std::lower_bound(rootNode->children.begin(), rootNode->children.end(), editOffset,
+                    [](const Parser::SemanticNodePtr &node, int offset) {
+                        return node->fullRange.end <= offset;
+                    });
+                if (it > rootNode->children.begin() && (it == rootNode->children.end() || (*it)->fullRange.start > editOffset)) {
+                    if ((*(it - 1))->fullRange.end >= editOffset) {
+                        --it;
+                    }
+                }
+
+                if (it != rootNode->children.end()) {
+                    const auto &matchingChild = *it;
+                    if (matchingChild->fullRange.start == curBlock.sourceRange.start &&
+                        matchingChild->type == curBlock.blockType)
+                    {
+                        QVector<VisualBlock> tempBlocks;
+                        processBlockNode(matchingChild, buffer, cursorPos, isSourceMode, tempBlocks);
+                        if (tempBlocks.size() == 1) {
+                            auto &oldBlock = m_blocks[dirtyIdx];
+                            auto &newBlock = tempBlocks[0];
+
+                            bool blockChanged = (oldBlock.visualText != newBlock.visualText ||
+                                                 oldBlock.blockType != newBlock.blockType ||
+                                                 oldBlock.headingLevel != newBlock.headingLevel ||
+                                                 oldBlock.indentLevel != newBlock.indentLevel ||
+                                                 oldBlock.isQuote != newBlock.isQuote ||
+                                                 oldBlock.isCodeBlock != newBlock.isCodeBlock ||
+                                                 oldBlock.isTaskItem != newBlock.isTaskItem ||
+                                                 oldBlock.isTaskChecked != newBlock.isTaskChecked ||
+                                                 oldBlock.marginTop != newBlock.marginTop ||
+                                                 oldBlock.marginBottom != newBlock.marginBottom ||
+                                                 oldBlock.segments.size() != newBlock.segments.size());
+                            if (!blockChanged) {
+                                for (int s = 0; s < oldBlock.segments.size(); ++s) {
+                                    const auto &sOld = oldBlock.segments[s];
+                                    const auto &sNew = newBlock.segments[s];
+                                    if (sOld.type != sNew.type ||
+                                        sOld.visualStart != sNew.visualStart ||
+                                        sOld.visualLength != sNew.visualLength ||
+                                        sOld.format != sNew.format)
+                                    {
+                                        blockChanged = true;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            m_blocks[dirtyIdx] = std::move(newBlock);
+
+                            int delta = lengthAdded - lengthRemoved;
+                            if (delta != 0) {
+                                for (int i = dirtyIdx + 1; i < m_blocks.size(); ++i) {
+                                    auto &b = m_blocks[i];
+                                    b.sourceRange.start += delta;
+                                    b.sourceRange.end += delta;
+                                    for (auto &seg : b.segments) {
+                                        if (seg.sourceRange.isValid()) {
+                                            seg.sourceRange.start += delta;
+                                            seg.sourceRange.end += delta;
+                                        }
+                                    }
+                                    if (b.isTaskItem && b.checkboxSourceRange.isValid() && !b.checkboxSourceRange.isEmpty()) {
+                                        b.checkboxSourceRange.start += delta;
+                                        b.checkboxSourceRange.end += delta;
+                                    }
+                                }
+                            }
+
+                            m_lastCursorPos = cursorPos;
+                            return blockChanged || delta != 0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     QVector<VisualBlock> prevBlocks = std::move(m_blocks);
     m_blocks.clear();
 
     auto checkChanged = [&]() -> bool {
+        m_lastCursorPos = cursorPos;
         if (m_blocks.size() != prevBlocks.size()) {
             return true;
         }
@@ -391,54 +492,9 @@ bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
         return checkChanged();
     }
 
-    // Traverse root children (with dirty-block reconstruction if edit region provided)
-    const int N = rootNode->children.size();
-    int delta = lengthAdded - lengthRemoved;
-    if (editOffset >= 0 && !prevBlocks.isEmpty() && !isSourceMode && N == prevBlocks.size()) {
-        m_blocks.reserve(N);
-        for (int i = 0; i < N; ++i) {
-            const auto &child = rootNode->children[i];
-            const auto &prev = prevBlocks[i];
-
-            bool hasCursorNow = child->fullRange.contains(cursorPos);
-            bool hadCursorBefore = prev.sourceRange.contains(cursorPos);
-
-            // 1. Prefix: strictly before the edit and not affected by cursor marker toggles
-            if (child->fullRange.end < editOffset && !hasCursorNow && !hadCursorBefore && child->fullRange == prev.sourceRange) {
-                m_blocks.append(prev);
-                continue;
-            }
-
-            // 2. Suffix: strictly after the edit and not affected by cursor marker toggles
-            if (child->fullRange.start > (editOffset + lengthAdded) && !hasCursorNow && !hadCursorBefore &&
-                child->fullRange.start == prev.sourceRange.start + delta &&
-                child->fullRange.end == prev.sourceRange.end + delta)
-            {
-                VisualBlock shifted = prev;
-                shifted.sourceRange.start += delta;
-                shifted.sourceRange.end += delta;
-                for (auto &seg : shifted.segments) {
-                    if (seg.sourceRange.isValid()) {
-                        seg.sourceRange.start += delta;
-                        seg.sourceRange.end += delta;
-                    }
-                }
-                if (shifted.checkboxSourceRange.isValid()) {
-                    shifted.checkboxSourceRange.start += delta;
-                    shifted.checkboxSourceRange.end += delta;
-                }
-                m_blocks.append(std::move(shifted));
-                continue;
-            }
-
-            // 3. Dirty block: process through normal AST-to-visual transformation
-            processBlockNode(child, buffer, cursorPos, isSourceMode);
-        }
-    } else {
-        // Fallback: full traversal
-        for (const auto &child : rootNode->children) {
-            processBlockNode(child, buffer, cursorPos, isSourceMode);
-        }
+    // Traverse root children
+    for (const auto &child : rootNode->children) {
+        processBlockNode(child, buffer, cursorPos, isSourceMode, m_blocks);
     }
 
     if (m_blocks.isEmpty()) {
@@ -460,7 +516,8 @@ bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
 void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
                                         const Core::TextBuffer &buffer,
                                         int cursorPos,
-                                        bool isSourceMode)
+                                        bool isSourceMode,
+                                        QVector<VisualBlock> &outBlocks)
 {
     if (!node) {
         return;
@@ -471,7 +528,7 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
 
     if (node->type == NodeType::List) {
         for (const auto &item : node->children) {
-            processBlockNode(item, buffer, cursorPos, isSourceMode);
+            processBlockNode(item, buffer, cursorPos, isSourceMode, outBlocks);
         }
         return;
     }
@@ -666,7 +723,7 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
         block.segments.append(emptySeg);
     }
 
-    m_blocks.append(block);
+    outBlocks.append(std::move(block));
 }
 
 } // namespace MarkdownTool::Mapping

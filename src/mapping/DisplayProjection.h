@@ -72,17 +72,14 @@ public:
     int stepCursor(int currentSourceOffset, bool forward, const Core::TextBuffer &buffer) const;
 
 private:
-    void processNode(const Parser::SemanticNodePtr &node,
-                     const Core::TextBuffer &buffer,
-                     int cursorPos,
-                     bool isSourceMode);
-
     void processBlockNode(const Parser::SemanticNodePtr &node,
                           const Core::TextBuffer &buffer,
                           int cursorPos,
-                          bool isSourceMode);
+                          bool isSourceMode,
+                          QVector<VisualBlock> &outBlocks);
 
     QVector<VisualBlock> m_blocks;
+    int m_lastCursorPos = -1;
 };
 
 } // namespace MarkdownTool::Mapping

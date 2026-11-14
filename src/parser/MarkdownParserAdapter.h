@@ -18,6 +18,13 @@ public:
                              const Core::TextBuffer &buffer,
                              int editOffset,
                              int lengthRemoved,
+                             int lengthAdded,
+                             int &outChildIndex) const;
+
+    bool canIncrementalParse(const SemanticNodePtr &previousRoot,
+                             const Core::TextBuffer &buffer,
+                             int editOffset,
+                             int lengthRemoved,
                              const QString &insertText,
                              int &outChildIndex) const;
 

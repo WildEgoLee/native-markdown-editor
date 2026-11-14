@@ -314,7 +314,7 @@ bool MarkdownParserAdapter::canIncrementalParse(const SemanticNodePtr &previousR
                                                 const Core::TextBuffer &buffer,
                                                 int editOffset,
                                                 int lengthRemoved,
-                                                const QString &insertText,
+                                                int lengthAdded,
                                                 int &outChildIndex) const
 {
     outChildIndex = -1;
@@ -322,31 +322,56 @@ bool MarkdownParserAdapter::canIncrementalParse(const SemanticNodePtr &previousR
         return false;
     }
 
-    // If inserted text contains double-newlines or major block-level triggers, fall back to full parse
-    if (insertText.contains(QStringLiteral("\n\n")) ||
-        insertText.contains(QStringLiteral("```")) ||
-        insertText.contains(QStringLiteral("> ")) ||
-        insertText.contains(QStringLiteral("- [ ]")) ||
-        insertText.contains(QStringLiteral("- [x]")) ||
-        insertText.contains(QStringLiteral("|")))
-    {
+    if (editOffset < 0 || editOffset + lengthAdded > buffer.length()) {
         return false;
     }
 
-    // Find top-level child that encloses this edit
+    // 1. Inspect inserted text in buffer:
+    // If inserted text contains ANY newline, carriage return, code fence, blockquote, list marker, or heading prefix,
+    // it can change line numbers, block structure, or hierarchy. Must fall back to full cold parse!
+    if (lengthAdded > 0) {
+        QString insertText = buffer.substring(editOffset, lengthAdded);
+        if (insertText.contains(u'\n') ||
+            insertText.contains(u'\r') ||
+            insertText.contains(QStringLiteral("```")) ||
+            insertText.contains(QStringLiteral(">")) ||
+            insertText.contains(QStringLiteral("- ")) ||
+            insertText.contains(QStringLiteral("* ")) ||
+            insertText.contains(QStringLiteral("#")) ||
+            insertText.contains(QStringLiteral("|")))
+        {
+            return false;
+        }
+    }
+
+    // 2. Find the single top-level block child that encloses this edit
     int editEnd = editOffset + lengthRemoved;
     for (int i = 0; i < previousRoot->children.size(); ++i) {
         const auto &child = previousRoot->children[i];
         if (editOffset >= child->fullRange.start && editEnd <= child->fullRange.end) {
-            // Safe leaf block types for local incremental parsing
+            // Must be a leaf Paragraph block
             if (child->type == NodeType::Paragraph) {
-                outChildIndex = i;
-                return true;
+                // If text was removed, ensure lengthRemoved did not delete past paragraph boundaries
+                int newLen = child->fullRange.length() + (lengthAdded - lengthRemoved);
+                if (newLen > 0) {
+                    outChildIndex = i;
+                    return true;
+                }
             }
             break;
         }
     }
     return false;
+}
+
+bool MarkdownParserAdapter::canIncrementalParse(const SemanticNodePtr &previousRoot,
+                                                const Core::TextBuffer &buffer,
+                                                int editOffset,
+                                                int lengthRemoved,
+                                                const QString &insertText,
+                                                int &outChildIndex) const
+{
+    return canIncrementalParse(previousRoot, buffer, editOffset, lengthRemoved, insertText.length(), outChildIndex);
 }
 
 SemanticNodePtr MarkdownParserAdapter::incrementalParse(const SemanticNodePtr &previousRoot,
@@ -374,7 +399,8 @@ SemanticNodePtr MarkdownParserAdapter::incrementalParse(const SemanticNodePtr &p
     snippetBuffer.setText(blockText);
 
     auto snippetRoot = parse(snippetBuffer);
-    if (!snippetRoot || snippetRoot->children.isEmpty()) {
+    // Double-lock safety: snippet must produce EXACTLY ONE block of the EXACT SAME type!
+    if (!snippetRoot || snippetRoot->children.size() != 1 || snippetRoot->children[0]->type != oldChild->type) {
         return parse(buffer);
     }
 
@@ -388,13 +414,17 @@ SemanticNodePtr MarkdownParserAdapter::incrementalParse(const SemanticNodePtr &p
         node->fullRange.end += blockStart;
         node->contentRange.start += blockStart;
         node->contentRange.end += blockStart;
-        if (node->prefixRange.isValid()) {
+        if (node->prefixRange.isValid() && !node->prefixRange.isEmpty()) {
             node->prefixRange.start += blockStart;
             node->prefixRange.end += blockStart;
         }
-        if (node->suffixRange.isValid()) {
+        if (node->suffixRange.isValid() && !node->suffixRange.isEmpty()) {
             node->suffixRange.start += blockStart;
             node->suffixRange.end += blockStart;
+        }
+        if (node->isTaskItem && node->taskCheckboxRange.isValid() && !node->taskCheckboxRange.isEmpty()) {
+            node->taskCheckboxRange.start += blockStart;
+            node->taskCheckboxRange.end += blockStart;
         }
         for (const auto &c : node->children) {
             self(self, c);
@@ -416,15 +446,15 @@ SemanticNodePtr MarkdownParserAdapter::incrementalParse(const SemanticNodePtr &p
         cloned->fullRange.end += delta;
         cloned->contentRange.start += delta;
         cloned->contentRange.end += delta;
-        if (cloned->prefixRange.isValid()) {
+        if (cloned->prefixRange.isValid() && !cloned->prefixRange.isEmpty()) {
             cloned->prefixRange.start += delta;
             cloned->prefixRange.end += delta;
         }
-        if (cloned->suffixRange.isValid()) {
+        if (cloned->suffixRange.isValid() && !cloned->suffixRange.isEmpty()) {
             cloned->suffixRange.start += delta;
             cloned->suffixRange.end += delta;
         }
-        if (cloned->taskCheckboxRange.isValid()) {
+        if (cloned->isTaskItem && cloned->taskCheckboxRange.isValid() && !cloned->taskCheckboxRange.isEmpty()) {
             cloned->taskCheckboxRange.start += delta;
             cloned->taskCheckboxRange.end += delta;
         }

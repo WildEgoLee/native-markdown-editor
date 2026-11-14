@@ -106,7 +106,17 @@ void NativeEditorView::selectAll() {
 }
 
 void NativeEditorView::reparseAndRelayout(int editOffset, int lengthRemoved, int lengthAdded) {
-    m_rootNode = m_parser.parse(m_buffer);
+    int childIdx = -1;
+    if (editOffset >= 0 && m_rootNode &&
+        m_parser.canIncrementalParse(m_rootNode, m_buffer, editOffset, lengthRemoved, lengthAdded, childIdx))
+    {
+        m_rootNode = m_parser.incrementalParse(m_rootNode, m_buffer, editOffset, lengthRemoved, lengthAdded, childIdx);
+        m_incrementalParseHits++;
+    } else {
+        m_rootNode = m_parser.parse(m_buffer);
+        m_fullParseFallbacks++;
+    }
+
     m_projection.buildProjection(m_rootNode, m_buffer, m_cursorPos, m_isSourceMode, editOffset, lengthRemoved, lengthAdded);
     m_layoutEngine.layout(m_projection, qMax(200, viewport()->width()));
     updateScrollBars();
@@ -148,27 +158,40 @@ void NativeEditorView::executeEdit(int offset, int removeLength, const QString &
     int newCursor = offset + insertText.length();
     tx.setSelectionAfter(Core::SelectionState(newCursor, newCursor));
 
-    m_undoStack.push(tx, m_buffer);
-
+    // Crucial: update cursor position BEFORE pushing to undo stack so that when
+    // textChanged triggers reparseAndRelayout(), m_cursorPos is ALREADY the updated cursor!
     m_cursorPos = newCursor;
     m_selectionAnchor = newCursor;
+
+    m_undoStack.push(tx, m_buffer);
+
     ensureCursorVisible();
 }
 
 void NativeEditorView::undo() {
     Core::SelectionState sel;
-    if (m_undoStack.undo(m_buffer, sel)) {
+    m_buffer.blockSignals(true);
+    bool ok = m_undoStack.undo(m_buffer, sel);
+    m_buffer.blockSignals(false);
+    if (ok) {
         m_cursorPos = sel.cursor;
         m_selectionAnchor = sel.anchor;
+        reparseAndRelayout();
+        emit textChanged();
         ensureCursorVisible();
     }
 }
 
 void NativeEditorView::redo() {
     Core::SelectionState sel;
-    if (m_undoStack.redo(m_buffer, sel)) {
+    m_buffer.blockSignals(true);
+    bool ok = m_undoStack.redo(m_buffer, sel);
+    m_buffer.blockSignals(false);
+    if (ok) {
         m_cursorPos = sel.cursor;
         m_selectionAnchor = sel.anchor;
+        reparseAndRelayout();
+        emit textChanged();
         ensureCursorVisible();
     }
 }

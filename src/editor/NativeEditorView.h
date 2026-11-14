@@ -62,6 +62,9 @@ public:
 
     void reparseAndRelayout(int editOffset = -1, int lengthRemoved = 0, int lengthAdded = 0);
 
+    quint64 incrementalParseHits() const { return m_incrementalParseHits; }
+    quint64 fullParseFallbacks() const { return m_fullParseFallbacks; }
+
 signals:
     void cursorMoved(int line, int col, int offset);
     void textChanged();
@@ -110,6 +113,9 @@ private:
 
     bool m_isMouseSelecting = false;
     UI::SlashCommandPopup *m_slashPopup = nullptr;
+
+    quint64 m_incrementalParseHits = 0;
+    quint64 m_fullParseFallbacks = 0;
 };
 
 } // namespace MarkdownTool::Editor

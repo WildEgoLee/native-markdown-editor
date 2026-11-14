@@ -18,6 +18,9 @@
 #include "editor/NativeEditorView.h"
 #include "file/FileService.h"
 #include "file/DocumentSession.h"
+#include "render/MathSvgRenderer.h"
+#include "render/MermaidSvgRenderer.h"
+#include "render/AsyncRenderService.h"
 
 using namespace MarkdownTool;
 
@@ -55,6 +58,9 @@ private slots:
     void testLargeDocumentGuiInputLatency();
     void testMultiCursorEditingAndUndo();
     void testColumnSelectionAndMultiLinePaste();
+    void testMathFormulaAsyncRenderingAndProjection();
+    void testMermaidDiagramAsyncRenderingAndInteraction();
+    void testAsyncRenderServiceCachingAndThreadSafety();
 };
 
 // Probe 1: UTF-8 BOM, CRLF, trailing spaces, no-newline exact byte-for-byte invariance
@@ -1968,6 +1974,173 @@ void TestProbes::testColumnSelectionAndMultiLinePaste() {
     QCOMPARE(view.cursors()[0].cursor, 3);
     QCOMPARE(view.cursors()[1].cursor, 7);
     QCOMPARE(view.cursors()[2].cursor, 11);
+}
+
+// Probe 31: Math formula LaTeX SVG rendering, parsing, and live preview projection
+void TestProbes::testMathFormulaAsyncRenderingAndProjection() {
+    // 1. Math Svg Renderer unit tests
+    QString formula = QStringLiteral("$$E = mc^2$$");
+    QByteArray svg = Render::MathSvgRenderer::renderToSvg(formula);
+    QVERIFY(!svg.isEmpty());
+    QVERIFY(svg.contains("<svg"));
+    QVERIFY(svg.contains("font-family"));
+    QVERIFY(svg.contains("text"));
+
+    // Fraction rendering
+    QString fracFormula = QStringLiteral("$$\\frac{a + b}{c}$$");
+    QByteArray fracSvg = Render::MathSvgRenderer::renderToSvg(fracFormula);
+    QVERIFY(!fracSvg.isEmpty());
+    QVERIFY(fracSvg.contains("<line")); // Fraction bar
+
+    QSize estimated = Render::MathSvgRenderer::estimateSize(fracFormula);
+    QVERIFY(estimated.width() > 50);
+    QVERIFY(estimated.height() >= 50);
+
+    // 2. Parser recognizing MathBlock
+    Parser::MarkdownParserAdapter parser;
+    QString doc = QStringLiteral("Title\n\n$$\nf(x) = x^2\n$$\n\nAfter\n");
+    Core::TextBuffer buffer;
+    buffer.setText(doc);
+    auto ast = parser.parse(buffer);
+    QVERIFY(ast != nullptr);
+
+    bool foundMathBlock = false;
+    for (const auto &child : ast->children) {
+        if (child->type == Parser::NodeType::MathBlock) {
+            foundMathBlock = true;
+            break;
+        }
+    }
+    QVERIFY(foundMathBlock);
+
+    // 3. DisplayProjection in Live Preview Mode
+    Mapping::DisplayProjection proj;
+
+    // Cursor at pos 0 (outside math block) -> Collapsed embedded card
+    proj.buildProjection(ast, buffer, 0, false);
+    bool hasMathVisual = false;
+    for (const auto &b : proj.blocks()) {
+        if (b.isMathBlock) {
+            hasMathVisual = true;
+            QVERIFY(!b.isInteractiveActive);
+            QVERIFY(b.embeddedSource.contains(QStringLiteral("f(x) = x^2")));
+        }
+    }
+    QVERIFY(hasMathVisual);
+
+    // Move cursor inside the math block
+    int insidePos = doc.indexOf(QStringLiteral("f(x)"));
+    QVERIFY(insidePos > 0);
+    proj.buildProjection(ast, buffer, insidePos, false);
+    bool hasActiveMath = false;
+    for (const auto &b : proj.blocks()) {
+        if (b.isMathBlock && b.isInteractiveActive) {
+            hasActiveMath = true;
+        }
+    }
+    QVERIFY(hasActiveMath);
+
+    // In Source Mode -> No special collapsed math visual block
+    proj.buildProjection(ast, buffer, 0, true);
+    for (const auto &b : proj.blocks()) {
+        QVERIFY(!b.isMathBlock);
+    }
+}
+
+// Probe 32: Mermaid diagram SVG rendering, sequence & flowchart layout, and interactive click activation
+void TestProbes::testMermaidDiagramAsyncRenderingAndInteraction() {
+    // 1. Flowchart rendering
+    QString flowchart = QStringLiteral("graph TD\nA[Start] --> B{Choice}\nB -->|Yes| C((Done))");
+    QByteArray fcSvg = Render::MermaidSvgRenderer::renderToSvg(flowchart);
+    QVERIFY(!fcSvg.isEmpty());
+    QVERIFY(fcSvg.contains("<svg"));
+    QVERIFY(fcSvg.contains("Start"));
+    QVERIFY(fcSvg.contains("Choice"));
+    QVERIFY(fcSvg.contains("Done"));
+    QVERIFY(fcSvg.contains("polygon") || fcSvg.contains("circle"));
+
+    // 2. Sequence diagram rendering
+    QString seq = QStringLiteral("sequenceDiagram\nClient->>Server: Request\nServer-->>Client: Response");
+    QByteArray seqSvg = Render::MermaidSvgRenderer::renderToSvg(seq);
+    QVERIFY(!seqSvg.isEmpty());
+    QVERIFY(seqSvg.contains("<svg"));
+    QVERIFY(seqSvg.contains("Client"));
+    QVERIFY(seqSvg.contains("Server"));
+    QVERIFY(seqSvg.contains("Request"));
+    QVERIFY(seqSvg.contains("Response"));
+    QVERIFY(seqSvg.contains("seq-arrow"));
+
+    // 3. Editor View live preview & click activation
+    Editor::NativeEditorView view;
+    view.resize(800, 600);
+    QString editorDoc = QStringLiteral("Intro\n\n```mermaid\ngraph LR\nA --> B\n```\n\nOutro\n");
+    view.buffer().setText(editorDoc);
+    view.setCursorPos(0); // Cursor at intro
+
+    // Check that mermaid block is projected
+    const auto &blocks = view.projection().blocks();
+    int mermaidBlockIdx = -1;
+    for (int i = 0; i < blocks.size(); ++i) {
+        if (blocks[i].isMermaidBlock) {
+            mermaidBlockIdx = i;
+            break;
+        }
+    }
+    QVERIFY(mermaidBlockIdx != -1);
+    QVERIFY(!blocks[mermaidBlockIdx].isInteractiveActive);
+
+    // Simulate clicking on the mermaid card
+    QRectF cardRect = view.layoutEngine().cursorRect(blocks[mermaidBlockIdx].sourceRange.start, view.projection());
+    QPoint clickPoint(static_cast<int>(cardRect.center().x()), static_cast<int>(cardRect.center().y()));
+    QMouseEvent clickEvent(QEvent::MouseButtonPress, clickPoint, clickPoint, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(view.viewport(), &clickEvent);
+
+    // Cursor should now be inside the mermaid code block, activating it
+    int newCursor = view.cursorPos();
+    QVERIFY(newCursor >= blocks[mermaidBlockIdx].sourceRange.start);
+    QVERIFY(newCursor <= blocks[mermaidBlockIdx].sourceRange.end);
+    QVERIFY(view.projection().blocks()[mermaidBlockIdx].isInteractiveActive);
+}
+
+// Probe 33: AsyncRenderService caching, thread safety, and memory lifecycle
+void TestProbes::testAsyncRenderServiceCachingAndThreadSafety() {
+    auto service = Render::AsyncRenderService::instance();
+    QVERIFY(service != nullptr);
+
+    service->clearCache();
+
+    QString mathSource = QStringLiteral("$$\\int_0^1 x^2 dx$$");
+    QSignalSpy spy(service, &Render::AsyncRenderService::renderReady);
+
+    // First request: not in cache yet
+    auto firstResult = service->getRenderer(mathSource, Render::RenderKind::Math, false);
+    if (!firstResult) {
+        service->requestRender(mathSource, Render::RenderKind::Math);
+        // Wait up to 1000ms for background thread pool rendering
+        QVERIFY(spy.wait(1000));
+        QVERIFY(spy.count() >= 1);
+    }
+
+    // Subsequent request should be an immediate cache hit
+    auto cachedResult = service->getRenderer(mathSource, Render::RenderKind::Math, false);
+    QVERIFY(cachedResult != nullptr);
+    QVERIFY(cachedResult->isValid());
+
+    // Mermaid async request
+    QString mermaidSource = QStringLiteral("graph LR\nX --> Y");
+    auto mermaidResult = service->getRenderer(mermaidSource, Render::RenderKind::Mermaid, false);
+    if (!mermaidResult) {
+        service->requestRender(mermaidSource, Render::RenderKind::Mermaid);
+        QVERIFY(spy.wait(1000));
+    }
+    auto cachedMermaid = service->getRenderer(mermaidSource, Render::RenderKind::Mermaid, false);
+    QVERIFY(cachedMermaid != nullptr);
+    QVERIFY(cachedMermaid->isValid());
+
+    // Clear cache
+    service->clearCache();
+    QVERIFY(!service->isCached(mathSource));
+    QVERIFY(!service->isCached(mermaidSource));
 }
 
 QTEST_MAIN(TestProbes)

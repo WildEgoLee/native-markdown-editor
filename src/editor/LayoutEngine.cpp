@@ -1,4 +1,7 @@
 #include "LayoutEngine.h"
+#include "render/AsyncRenderService.h"
+#include "render/MathSvgRenderer.h"
+#include "render/MermaidSvgRenderer.h"
 
 #include <QPainterPath>
 #include <QAbstractTextDocumentLayout>
@@ -18,6 +21,39 @@ void LayoutEngine::layoutSingleBlock(const Mapping::VisualBlock &vBlock,
 {
     BlockLayoutData bData;
     bData.visualBlockIndex = blockIndex;
+    bData.isMathBlock = vBlock.isMathBlock;
+    bData.isMermaidBlock = vBlock.isMermaidBlock;
+    bData.isInteractiveActive = vBlock.isInteractiveActive;
+    bData.embeddedSource = vBlock.embeddedSource;
+
+    // Collapsed Embedded Component (Live Preview Mode, cursor outside)
+    if ((vBlock.isMathBlock || vBlock.isMermaidBlock) && !vBlock.isInteractiveActive) {
+        currentY += vBlock.marginTop;
+        qreal cardH = 80.0;
+        if (vBlock.isMermaidBlock) {
+            cardH = std::max(160.0, static_cast<qreal>(Render::MermaidSvgRenderer::estimateSize(vBlock.embeddedSource).height() + 30.0));
+        } else {
+            cardH = std::max(70.0, static_cast<qreal>(Render::MathSvgRenderer::estimateSize(vBlock.embeddedSource).height() + 24.0));
+        }
+        bData.rect = QRectF(20.0, currentY, contentWidth - 40.0, cardH);
+        bData.embeddedPreviewRect = bData.rect;
+        currentY += cardH + vBlock.marginBottom;
+
+        bData.cachedText = vBlock.visualText;
+        bData.cachedSegments = vBlock.segments;
+        bData.cachedIndentLevel = vBlock.indentLevel;
+        bData.cachedHeadingLevel = vBlock.headingLevel;
+        bData.cachedMarginTop = vBlock.marginTop;
+        bData.cachedMarginBottom = vBlock.marginBottom;
+        bData.cachedIsQuote = vBlock.isQuote;
+        bData.cachedIsCodeBlock = vBlock.isCodeBlock;
+        bData.cachedBlockType = vBlock.blockType;
+        bData.hasIme = false;
+
+        m_blocks.append(std::move(bData));
+        return;
+    }
+
     bData.layout = std::make_shared<QTextLayout>();
 
     QString lineText = vBlock.visualText;
@@ -92,8 +128,21 @@ void LayoutEngine::layoutSingleBlock(const Mapping::VisualBlock &vBlock,
         y = 24.0; // Minimum block height
     }
 
-    bData.rect = QRectF(20.0, currentY, contentWidth - 40.0, y);
-    currentY += y + vBlock.marginBottom;
+    qreal previewH = 0.0;
+    if (vBlock.isMathBlock || vBlock.isMermaidBlock) {
+        if (vBlock.isMermaidBlock) {
+            previewH = std::max(150.0, static_cast<qreal>(Render::MermaidSvgRenderer::estimateSize(vBlock.embeddedSource).height() + 20.0));
+        } else {
+            previewH = std::max(64.0, static_cast<qreal>(Render::MathSvgRenderer::estimateSize(vBlock.embeddedSource).height() + 20.0));
+        }
+    }
+
+    qreal totalBlockH = y + (previewH > 0 ? (previewH + 12.0) : 0.0);
+    bData.rect = QRectF(20.0, currentY, contentWidth - 40.0, totalBlockH);
+    if (previewH > 0) {
+        bData.embeddedPreviewRect = QRectF(bData.rect.left(), bData.rect.top() + y + 8.0, bData.rect.width(), previewH);
+    }
+    currentY += totalBlockH + vBlock.marginBottom;
 
     bData.cachedText = vBlock.visualText;
     bData.cachedSegments = vBlock.segments;
@@ -118,6 +167,10 @@ void LayoutEngine::reuseBlock(const BlockLayoutData &src,
     BlockLayoutData bData;
     bData.visualBlockIndex = blockIndex;
     bData.layout = src.layout; // Direct reuse without text shaping or line layout
+    bData.isMathBlock = src.isMathBlock;
+    bData.isMermaidBlock = src.isMermaidBlock;
+    bData.isInteractiveActive = src.isInteractiveActive;
+    bData.embeddedSource = src.embeddedSource;
     bData.cachedText = src.cachedText;
     bData.cachedSegments = src.cachedSegments;
     bData.cachedIndentLevel = src.cachedIndentLevel;
@@ -132,6 +185,9 @@ void LayoutEngine::reuseBlock(const BlockLayoutData &src,
     currentY += vBlock.marginTop;
     qreal h = src.rect.height();
     bData.rect = QRectF(20.0, currentY, contentWidth - 40.0, h);
+    if (!src.embeddedPreviewRect.isEmpty()) {
+        bData.embeddedPreviewRect = QRectF(20.0, currentY + (src.embeddedPreviewRect.top() - src.rect.top()), contentWidth - 40.0, src.embeddedPreviewRect.height());
+    }
     currentY += h + vBlock.marginBottom;
 
     m_blocks.append(std::move(bData));
@@ -144,7 +200,14 @@ bool LayoutEngine::isBlockLayoutEqual(const Mapping::VisualBlock &vBlock,
     if (prevData.hasIme || hasImeHere) {
         return false;
     }
-    if (!prevData.layout) {
+    if (prevData.isMathBlock != vBlock.isMathBlock ||
+        prevData.isMermaidBlock != vBlock.isMermaidBlock ||
+        prevData.isInteractiveActive != vBlock.isInteractiveActive ||
+        prevData.embeddedSource != vBlock.embeddedSource)
+    {
+        return false;
+    }
+    if (!prevData.layout && (!prevData.isMathBlock && !prevData.isMermaidBlock)) {
         return false;
     }
     if (prevData.cachedText != vBlock.visualText ||
@@ -373,8 +436,54 @@ void LayoutEngine::paint(QPainter *painter,
 
         const auto &vBlock = vBlocks[bData.visualBlockIndex];
 
+        // Draw Math or Mermaid Embedded Component
+        if (bData.isMathBlock || bData.isMermaidBlock) {
+            Render::RenderKind kind = bData.isMathBlock ? Render::RenderKind::Math : Render::RenderKind::Mermaid;
+            auto renderer = Render::AsyncRenderService::instance()->getRenderer(bData.embeddedSource, kind, false);
+
+            if (!bData.isInteractiveActive) {
+                // Collapsed Live Preview Mode (Cursor is outside): Render full embedded preview card!
+                painter->save();
+                painter->setRenderHint(QPainter::Antialiasing, true);
+
+                QRectF cardRect = bData.rect.adjusted(2, 2, -2, -2);
+                painter->setPen(QPen(QColor(226, 232, 240), 1.2));
+                painter->setBrush(QColor(248, 250, 252));
+                painter->drawRoundedRect(cardRect, 8.0, 8.0);
+
+                // Badge top-left
+                QRectF badgeRect(cardRect.left() + 10, cardRect.top() + 6, bData.isMathBlock ? 54 : 68, 18);
+                painter->setPen(Qt::NoPen);
+                painter->setBrush(bData.isMathBlock ? QColor(139, 92, 246, 35) : QColor(37, 99, 235, 35));
+                painter->drawRoundedRect(badgeRect, 4.0, 4.0);
+
+                painter->setPen(bData.isMathBlock ? QColor(109, 40, 217) : QColor(29, 78, 216));
+                QFont badgeFont = painter->font();
+                badgeFont.setPointSize(8);
+                badgeFont.setBold(true);
+                painter->setFont(badgeFont);
+                painter->drawText(badgeRect, Qt::AlignCenter, bData.isMathBlock ? QStringLiteral("LaTeX") : QStringLiteral("Mermaid"));
+
+                // Render SVG or Placeholder
+                QRectF contentRect = cardRect.adjusted(12, 24, -12, -8);
+                if (renderer && renderer->isValid()) {
+                    renderer->render(painter, contentRect);
+                } else {
+                    painter->setPen(QColor(148, 163, 184));
+                    QFont hintFont = painter->font();
+                    hintFont.setPointSize(9);
+                    hintFont.setItalic(true);
+                    painter->setFont(hintFont);
+                    painter->drawText(contentRect, Qt::AlignCenter, QStringLiteral("Rendering preview..."));
+                }
+
+                painter->restore();
+                continue; // Do not draw code text when collapsed
+            }
+        }
+
         // Draw block specific decorations
-        if (vBlock.isCodeBlock) {
+        if (vBlock.isCodeBlock || vBlock.isMathBlock) {
             // Dark rounded background
             painter->setBrush(QColor(40, 44, 52));
             painter->setPen(Qt::NoPen);
@@ -425,6 +534,39 @@ void LayoutEngine::paint(QPainter *painter,
         // Draw layout text
         if (bData.layout) {
             bData.layout->draw(painter, bData.rect.topLeft());
+        }
+
+        // Live preview container below code when active
+        if ((bData.isMathBlock || bData.isMermaidBlock) && bData.isInteractiveActive && !bData.embeddedPreviewRect.isEmpty()) {
+            Render::RenderKind kind = bData.isMathBlock ? Render::RenderKind::Math : Render::RenderKind::Mermaid;
+            auto renderer = Render::AsyncRenderService::instance()->getRenderer(bData.embeddedSource, kind, false);
+
+            painter->save();
+            painter->setRenderHint(QPainter::Antialiasing, true);
+
+            QRectF previewCard = bData.embeddedPreviewRect.adjusted(2, 2, -2, -2);
+            painter->setPen(QPen(QColor(203, 213, 225), 1.2));
+            painter->setBrush(QColor(255, 255, 255));
+            painter->drawRoundedRect(previewCard, 8.0, 8.0);
+
+            // Live preview badge
+            QRectF badgeRect(previewCard.left() + 10, previewCard.top() + 6, 80, 18);
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(QColor(16, 185, 129, 30));
+            painter->drawRoundedRect(badgeRect, 4.0, 4.0);
+
+            painter->setPen(QColor(5, 150, 105));
+            QFont badgeFont = painter->font();
+            badgeFont.setPointSize(8);
+            badgeFont.setBold(true);
+            painter->setFont(badgeFont);
+            painter->drawText(badgeRect, Qt::AlignCenter, QStringLiteral("Live Preview"));
+
+            QRectF contentRect = previewCard.adjusted(12, 26, -12, -8);
+            if (renderer && renderer->isValid()) {
+                renderer->render(painter, contentRect);
+            }
+            painter->restore();
         }
     }
 }

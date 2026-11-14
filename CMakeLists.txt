@@ -12,7 +12,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Test)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Test Svg)
 
 # cmark-gfm settings
 set(CMARK_TESTS OFF CACHE BOOL "" FORCE)
@@ -41,6 +41,13 @@ set(CORE_SOURCES
     src/editor/LayoutEngine.cpp
     src/editor/NativeEditorView.h
     src/editor/NativeEditorView.cpp
+
+    src/render/MathSvgRenderer.h
+    src/render/MathSvgRenderer.cpp
+    src/render/MermaidSvgRenderer.h
+    src/render/MermaidSvgRenderer.cpp
+    src/render/AsyncRenderService.h
+    src/render/AsyncRenderService.cpp
 
     src/file/FileService.h
     src/file/FileService.cpp
@@ -72,6 +79,7 @@ target_link_libraries(markdown_editor_core PUBLIC
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
+    Qt6::Svg
     libcmark-gfm_static
     libcmark-gfm-extensions_static
 )

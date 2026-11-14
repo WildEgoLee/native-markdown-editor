@@ -27,6 +27,13 @@ struct BlockLayoutData {
     bool cachedIsCodeBlock = false;
     Parser::NodeType cachedBlockType = Parser::NodeType::Paragraph;
     bool hasIme = false;
+
+    // Math & Diagram Embedded Component data
+    bool isMathBlock = false;
+    bool isMermaidBlock = false;
+    bool isInteractiveActive = false;
+    QString embeddedSource;
+    QRectF embeddedPreviewRect;
 };
 
 class LayoutEngine {

@@ -30,6 +30,7 @@ enum class NodeType {
     Image,
     SoftBreak,
     LineBreak,
+    MathBlock,
     CustomBlock,
 };
 
@@ -64,7 +65,8 @@ struct SemanticNode {
                type == NodeType::CodeBlock ||
                type == NodeType::ThematicBreak ||
                type == NodeType::Table ||
-               type == NodeType::TableRow;
+               type == NodeType::TableRow ||
+               type == NodeType::MathBlock;
     }
 };
 

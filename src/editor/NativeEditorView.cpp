@@ -1,5 +1,6 @@
 #include "NativeEditorView.h"
 #include "ui/SlashCommandPopup.h"
+#include "render/AsyncRenderService.h"
 
 #include <QPainter>
 #include <QMouseEvent>
@@ -48,6 +49,10 @@ NativeEditorView::NativeEditorView(QWidget *parent)
         m_cursors = {Core::SelectionState(0, 0)};
         reparseAndRelayout();
         emit textChanged();
+    });
+
+    connect(Render::AsyncRenderService::instance(), &Render::AsyncRenderService::renderReady, this, [this](const QString &) {
+        viewport()->update();
     });
 
     m_cursors = {Core::SelectionState(0, 0)};

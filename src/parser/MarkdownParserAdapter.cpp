@@ -98,9 +98,17 @@ static SemanticNodePtr convertNode(cmark_node *node, const Core::TextBuffer &buf
         break;
     }
 
-    case CMARK_NODE_PARAGRAPH:
+    case CMARK_NODE_PARAGRAPH: {
         semNode->type = NodeType::Paragraph;
+        int s = semNode->fullRange.start;
+        int e = semNode->fullRange.end;
+        QString pText = fullText.mid(s, e - s).trimmed();
+        if (pText.startsWith(QStringLiteral("$$")) && pText.endsWith(QStringLiteral("$$")) && pText.length() >= 4) {
+            semNode->type = NodeType::MathBlock;
+            semNode->textContent = pText.mid(2, pText.length() - 4).trimmed();
+        }
         break;
+    }
 
     case CMARK_NODE_BLOCK_QUOTE: {
         semNode->type = NodeType::BlockQuote;
@@ -149,11 +157,15 @@ static SemanticNodePtr convertNode(cmark_node *node, const Core::TextBuffer &buf
         semNode->type = NodeType::CodeBlock;
         const char *info = cmark_node_get_fence_info(node);
         if (info) {
-            semNode->codeLanguage = QString::fromUtf8(info);
+            semNode->codeLanguage = QString::fromUtf8(info).trimmed();
         }
         const char *lit = cmark_node_get_literal(node);
         if (lit) {
             semNode->textContent = QString::fromUtf8(lit);
+        }
+        if (semNode->codeLanguage.compare(QStringLiteral("math"), Qt::CaseInsensitive) == 0 ||
+            semNode->codeLanguage.compare(QStringLiteral("latex"), Qt::CaseInsensitive) == 0) {
+            semNode->type = NodeType::MathBlock;
         }
         break;
     }

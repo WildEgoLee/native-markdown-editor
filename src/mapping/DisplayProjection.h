@@ -16,6 +16,7 @@ enum class SegmentType {
     HiddenMarker,
     TaskCheckBox,
     CodeBlockContent,
+    EmbeddedWidget,
 };
 
 struct VisualSegment {
@@ -45,6 +46,13 @@ struct VisualBlock {
     bool isTaskItem = false;
     bool isTaskChecked = false;
     Core::SourceRange checkboxSourceRange;
+
+    // Math & Diagram Embedded Component attributes
+    bool isMathBlock = false;
+    bool isMermaidBlock = false;
+    QString embeddedSource;
+    bool isInteractiveActive = false;
+    qreal embeddedHeight = 0.0;
 
     int sourceToVisual(int sourceOffset) const;
     int visualToSource(int visualOffset, bool preferTrailing = false) const;

@@ -47,6 +47,9 @@ public:
     bool isSourceMode() const { return m_isSourceMode; }
     void setSourceMode(bool enabled);
 
+    const Mapping::DisplayProjection &projection() const { return m_projection; }
+    const LayoutEngine &layoutEngine() const { return m_layoutEngine; }
+
     void setCursorPos(int pos, bool keepAnchor = false);
     void selectAll();
 

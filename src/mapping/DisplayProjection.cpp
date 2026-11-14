@@ -341,6 +341,10 @@ bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
                                                  oldBlock.isCodeBlock != newBlock.isCodeBlock ||
                                                  oldBlock.isTaskItem != newBlock.isTaskItem ||
                                                  oldBlock.isTaskChecked != newBlock.isTaskChecked ||
+                                                 oldBlock.isMathBlock != newBlock.isMathBlock ||
+                                                 oldBlock.isMermaidBlock != newBlock.isMermaidBlock ||
+                                                 oldBlock.isInteractiveActive != newBlock.isInteractiveActive ||
+                                                 oldBlock.embeddedSource != newBlock.embeddedSource ||
                                                  oldBlock.marginTop != newBlock.marginTop ||
                                                  oldBlock.marginBottom != newBlock.marginBottom ||
                                                  oldBlock.segments.size() != newBlock.segments.size());
@@ -411,6 +415,10 @@ bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
                 b1.isCodeBlock != b2.isCodeBlock ||
                 b1.isTaskItem != b2.isTaskItem ||
                 b1.isTaskChecked != b2.isTaskChecked ||
+                b1.isMathBlock != b2.isMathBlock ||
+                b1.isMermaidBlock != b2.isMermaidBlock ||
+                b1.isInteractiveActive != b2.isInteractiveActive ||
+                b1.embeddedSource != b2.embeddedSource ||
                 b1.marginTop != b2.marginTop ||
                 b1.marginBottom != b2.marginBottom ||
                 b1.segments.size() != b2.segments.size())
@@ -659,6 +667,13 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
         block.marginTop = 8;
         block.marginBottom = 8;
 
+        bool isMermaid = (node->codeLanguage.compare(QStringLiteral("mermaid"), Qt::CaseInsensitive) == 0);
+        if (isMermaid) {
+            block.isMermaidBlock = true;
+            block.embeddedSource = node->textContent.isEmpty() ? fullText.mid(node->fullRange.start, node->fullRange.length()) : node->textContent;
+            block.isInteractiveActive = isSourceMode || node->fullRange.contains(cursorPos);
+        }
+
         baseFormat.setFontFamilies({QStringLiteral("Consolas"), QStringLiteral("Fira Code"), QStringLiteral("Courier New"), QStringLiteral("monospace")});
         baseFormat.setFontPointSize(12);
         baseFormat.setForeground(QColor(220, 225, 230));
@@ -673,6 +688,27 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
 
         block.visualText = codeSeg.text;
         block.segments.append(codeSeg);
+    } else if (node->type == NodeType::MathBlock) {
+        block.isMathBlock = true;
+        block.marginTop = 10;
+        block.marginBottom = 10;
+        block.embeddedSource = node->textContent.isEmpty() ? fullText.mid(node->fullRange.start, node->fullRange.length()) : node->textContent;
+        block.isInteractiveActive = isSourceMode || node->fullRange.contains(cursorPos);
+
+        baseFormat.setFontFamilies({QStringLiteral("Consolas"), QStringLiteral("Fira Code"), QStringLiteral("Courier New"), QStringLiteral("monospace")});
+        baseFormat.setFontPointSize(12);
+        baseFormat.setForeground(QColor(200, 210, 225));
+
+        VisualSegment mathSeg;
+        mathSeg.sourceRange = node->fullRange;
+        mathSeg.text = node->textContent.isEmpty() ? fullText.mid(node->fullRange.start, node->fullRange.length()) : node->textContent;
+        mathSeg.visualStart = 0;
+        mathSeg.visualLength = mathSeg.text.length();
+        mathSeg.type = SegmentType::CodeBlockContent;
+        mathSeg.format = baseFormat;
+
+        block.visualText = mathSeg.text;
+        block.segments.append(mathSeg);
     } else if (node->type == NodeType::Table) {
         block.marginTop = 10;
         block.marginBottom = 10;

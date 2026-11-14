@@ -151,17 +151,21 @@ static MathBox renderBox(const QString &latex, int fontSize, int depth = 0) {
                         // 2. Fraction (Numerator, Line, Denominator)
                         int numX = curX + (fracContentWidth - boxNum.width) / 2;
                         int numY = barY - 4 - boxNum.height;
-                        elements.append(QStringLiteral("<g transform=\"translate(%1, %2)\">%3</g>\n")
+                        int denX = curX + (fracContentWidth - boxDen.width) / 2;
+                        int denY = barY + 6;
+
+                        elements.append(QStringLiteral("<g class=\"fraction\" data-num-y=\"%1\" data-bar-y=\"%2\" data-den-y=\"%3\">\n")
+                            .arg(numY).arg(barY).arg(denY));
+                        elements.append(QStringLiteral("  <g transform=\"translate(%1, %2)\">%3</g>\n")
                             .arg(numX).arg(numY).arg(boxNum.xml));
 
                         // Fraction Bar
-                        elements.append(QStringLiteral("<line x1=\"%1\" y1=\"%2\" x2=\"%3\" y2=\"%2\" stroke=\"#0F172A\" stroke-width=\"1.6\" />\n")
+                        elements.append(QStringLiteral("  <line x1=\"%1\" y1=\"%2\" x2=\"%3\" y2=\"%2\" stroke=\"#0F172A\" stroke-width=\"1.6\" />\n")
                             .arg(curX).arg(barY).arg(curX + fracContentWidth));
 
-                        int denX = curX + (fracContentWidth - boxDen.width) / 2;
-                        int denY = barY + 6;
-                        elements.append(QStringLiteral("<g transform=\"translate(%1, %2)\">%3</g>\n")
+                        elements.append(QStringLiteral("  <g transform=\"translate(%1, %2)\">%3</g>\n")
                             .arg(denX).arg(denY).arg(boxDen.xml));
+                        elements.append(QStringLiteral("</g>\n"));
 
                         curX += fracContentWidth + 6;
 

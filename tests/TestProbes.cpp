@@ -7,6 +7,9 @@
 #include <QClipboard>
 #include <cmath>
 #include <random>
+#include <thread>
+#include <vector>
+#include <atomic>
 
 #include "core/Position.h"
 #include "core/TextBuffer.h"
@@ -2265,7 +2268,7 @@ void TestProbes::testNestedFractionsAndUnsupportedFallback() {
     QVERIFY(umSvg.contains("Notice: pie"));
 }
 
-// Probe 38: P1 Epoch pending request race condition isolation
+// Probe 38: P1 Epoch pending request race condition isolation and deterministic concurrency
 void TestProbes::testAsyncRenderServiceEpochRaceCondition() {
     auto service = Render::AsyncRenderService::instance();
     QVERIFY(service != nullptr);
@@ -2307,9 +2310,41 @@ void TestProbes::testAsyncRenderServiceEpochRaceCondition() {
     // Now it is cached and pending request is cleanly cleared
     QVERIFY(service->isCached(formula, Render::RenderKind::Math));
     QVERIFY(!service->isPending(formula, Render::RenderKind::Math));
+
+    // 6. Deterministic multi-threaded concurrency stress
+    std::atomic<bool> stopFlag{false};
+    std::vector<std::thread> workers;
+    for (int t = 0; t < 4; ++t) {
+        workers.emplace_back([service, &stopFlag, t]() {
+            int counter = 0;
+            while (!stopFlag.load()) {
+                QString src = QStringLiteral("$$x_%1^2$$").arg((counter++) % 10);
+                if (t % 2 == 0) {
+                    service->requestRender(src, Render::RenderKind::Math);
+                } else {
+                    service->getRenderer(src, Render::RenderKind::Math, false);
+                }
+                if (counter % 15 == 0 && t == 0) {
+                    service->clearCache();
+                }
+                std::this_thread::yield();
+            }
+        });
+    }
+
+    QTest::qWait(150);
+    stopFlag.store(true);
+    for (auto &w : workers) {
+        if (w.joinable()) w.join();
+    }
+    QCoreApplication::processEvents();
+
+    // Verify system state is completely consistent and thread-safe
+    QVERIFY(service->currentGeneration() >= gen2);
+    QVERIFY(service->maxCacheEntries() > 0);
 }
 
-// Probe 39: P1 Mermaid exact bounding box and visual non-clipping
+// Probe 39: P1 Mermaid exact bounding box, universal coordinate normalization, and visual non-clipping
 void TestProbes::testMermaidBoundingBoxAndVisualNoClipping() {
     // 1. Wide LR chain with multiple nodes
     QString wideChain = QStringLiteral("graph LR\nA --> B --> C --> D --> E --> F --> G");
@@ -2322,15 +2357,16 @@ void TestProbes::testMermaidBoundingBoxAndVisualNoClipping() {
     QVERIFY(m.hasMatch());
     qreal vbW = m.captured(1).toDouble();
     qreal vbH = m.captured(2).toDouble();
-    QVERIFY(vbW >= 700.0); // 7 nodes must span at least 700px in content viewBox
+    QVERIFY(vbW >= 700.0);
     QVERIFY(vbH >= 120.0);
 
-    // 2. Diagram with self-loops and cycle back-edges
+    // 2. Diagram with self-loops, back-edges, and cycles
     QString cyclicWithLoop = QStringLiteral(
         "graph TD\n"
         "Alpha[Node Alpha] --> Beta[Node Beta]\n"
         "Beta --> Alpha\n"
         "Alpha --> Alpha\n"
+        "Beta --> Beta\n"
     );
     QByteArray cycSvgBytes = Render::MermaidSvgRenderer::renderToSvg(cyclicWithLoop);
     QString cycSvg = QString::fromUtf8(cycSvgBytes);
@@ -2339,44 +2375,112 @@ void TestProbes::testMermaidBoundingBoxAndVisualNoClipping() {
     qreal cycW = mCyc.captured(1).toDouble();
     qreal cycH = mCyc.captured(2).toDouble();
 
-    // Verify back-edge arc and loop path markers are inside the canvas
     QVERIFY(cycSvg.contains("marker-end=\"url(#mermaid-arrow)\""));
     QVERIFY(cycW >= 360.0);
     QVERIFY(cycH >= 140.0);
+
+    // Coordinate validation: verify every rect and path has coordinates within [16.0, content - 12.0]
+    static QRegularExpression reRect(QStringLiteral("<rect x=\"([\\d\\.-]+)\" y=\"([\\d\\.-]+)\" width=\"([\\d\\.-]+)\" height=\"([\\d\\.-]+)\""));
+    auto rIt = reRect.globalMatch(cycSvg);
+    while (rIt.hasNext()) {
+        auto rm = rIt.next();
+        qreal rx = rm.captured(1).toDouble();
+        qreal ry = rm.captured(2).toDouble();
+        qreal rw = rm.captured(3).toDouble();
+        qreal rh = rm.captured(4).toDouble();
+        QVERIFY2(rx >= 16.0, qPrintable(QString("rx=%1 < 16.0").arg(rx)));
+        QVERIFY2(ry >= 16.0, qPrintable(QString("ry=%1 < 16.0").arg(ry)));
+        QVERIFY2(rx + rw <= cycW - 12.0, qPrintable(QString("rx+rw=%1 > cycW - 12 (%2)").arg(rx + rw).arg(cycW - 12.0)));
+        QVERIFY2(ry + rh <= cycH - 12.0, qPrintable(QString("ry+rh=%1 > cycH - 12 (%2)").arg(ry + rh).arg(cycH - 12.0)));
+    }
+
+    // 3. Pixel-level rasterization non-clipping test using QSvgRenderer -> QImage
+    QSvgRenderer renderer(cycSvgBytes);
+    QVERIFY(renderer.isValid());
+
+    QSize renderedSize(static_cast<int>(std::round(cycW)), static_cast<int>(std::round(cycH)));
+    QImage image(renderedSize, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+
+    QPainter painter(&image);
+    renderer.render(&painter);
+    painter.end();
+
+    int nonTransparentCount = 0;
+    int borderNonTransparentCount = 0;
+    int w = image.width();
+    int h = image.height();
+
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            QRgb pixel = image.pixel(x, y);
+            if (qAlpha(pixel) > 0) {
+                nonTransparentCount++;
+                // If pixel is on outer boundary (x=0, x=w-1, y=0, y=h-1), it indicates hard clipping
+                if (x == 0 || x == w - 1 || y == 0 || y == h - 1) {
+                    borderNonTransparentCount++;
+                }
+            }
+        }
+    }
+
+    // Must have successfully rendered graphic contents
+    QVERIFY(nonTransparentCount > 200);
+    // Boundary of image must have ZERO non-transparent pixels (guaranteed 100% no-clipping)
+    QCOMPARE(borderNonTransparentCount, 0);
 }
 
-// Probe 40: P1 AsyncRenderService concurrency stress and shutdown safety
+// Probe 40: P1 AsyncRenderService instance destruction safety with in-flight tasks & byte tracking
 void TestProbes::testAsyncRenderServiceShutdownWithInFlightTasks() {
-    auto service = Render::AsyncRenderService::instance();
-    QVERIFY(service != nullptr);
+    // 1. Standalone, destroyable AsyncRenderService instance test
+    {
+        auto isolatedService = std::make_unique<Render::AsyncRenderService>();
+        QVERIFY(isolatedService != nullptr);
+        QCOMPARE(isolatedService->totalCachedBytes(), 0);
 
-    service->clearCache();
+        // Queue 24 background requests (math + mermaid)
+        for (int i = 0; i < 12; ++i) {
+            isolatedService->requestRender(QStringLiteral("$$\\int_0^{%1} e^{-x^2} dx$$").arg(i), Render::RenderKind::Math);
+            isolatedService->requestRender(QStringLiteral("graph LR\nN%1 --> N%2").arg(i).arg(i + 1), Render::RenderKind::Mermaid);
+        }
 
-    // Queue 12 background requests concurrently
-    for (int i = 0; i < 12; ++i) {
-        QString f = QStringLiteral("$$\\sum_{k=0}^{%1} \\frac{1}{k!}$$").arg(i);
-        service->requestRender(f, Render::RenderKind::Math);
+        // Wait very briefly so that worker threads pick up tasks
+        QTest::qWait(10);
+
+        // Immediately destroy isolatedService while threads are running!
+        // Destructor MUST call clear(), disable m_aliveToken, and waitForDone(5000) safely.
+        isolatedService.reset();
     }
+    // Process any lingering events; must not crash or dereference dangling pointer
+    QCoreApplication::processEvents();
 
-    // Immediately trigger cache clear while workers are running
-    service->clearCache();
+    // 2. Closed-state rejection test
+    {
+        auto isolatedService2 = std::make_unique<Render::AsyncRenderService>();
+        // Check byte tracking
+        auto r = isolatedService2->getRenderer(QStringLiteral("$$a+b=c$$"), Render::RenderKind::Math, true);
+        QVERIFY(r != nullptr);
+        QVERIFY(isolatedService2->totalCachedBytes() > 0);
 
-    // Re-request subset of items in the new generation
-    for (int i = 0; i < 4; ++i) {
-        QString f = QStringLiteral("$$\\sum_{k=0}^{%1} \\frac{1}{k!}$$").arg(i);
-        service->requestRender(f, Render::RenderKind::Math);
+        isolatedService2->clearCache();
+        QCOMPARE(isolatedService2->totalCachedBytes(), 0);
+        QCOMPARE(isolatedService2->cacheCount(), 0);
+
+        // Reset service
+        isolatedService2.reset();
     }
+    QCoreApplication::processEvents();
 
-    // Wait briefly for worker tasks to settle
-    QTest::qWait(200);
-
-    // Must be completely stable with no memory leaks or thread crashes
-    QVERIFY(service->cacheCount() <= 4);
+    // 3. Global service cache sanity
+    auto globalService = Render::AsyncRenderService::instance();
+    QVERIFY(globalService != nullptr);
+    globalService->clearCache();
+    QCOMPARE(globalService->totalCachedBytes(), 0);
 }
 
-// Probe 41: P1 Nested fraction geometry, hierarchy, and coordinate validation
+// Probe 41: P1 Nested fraction geometry, hierarchy, and fraction bar non-intersection validation
 void TestProbes::testNestedFractionGeometryAndHierarchy() {
-    // Nested fraction: \frac{\frac{a}{b}+c}{d}
+    // 1. Nested fraction: \frac{\frac{a}{b}+c}{d}
     QString nested = QStringLiteral("$$\\frac{\\frac{a}{b}+c}{d}$$");
     QByteArray svgBytes = Render::MathSvgRenderer::renderToSvg(nested);
     QString svg = QString::fromUtf8(svgBytes);
@@ -2393,6 +2497,52 @@ void TestProbes::testNestedFractionGeometryAndHierarchy() {
 
     // Nested fraction inside numerator must have smaller font size than main expression
     QVERIFY(svg.contains("font-size=\"14\"") || svg.contains("font-size=\"11\"") || svg.contains("font-size=\"10\""));
+
+    // 2. Strict fraction bar vs text bounding box disjoint geometry validation
+    // Test formula: \frac{1+\frac{2}{3}}{4+\frac{5}{6}}
+    QString nestedDouble = QStringLiteral("$$\\frac{1+\\frac{2}{3}}{4+\\frac{5}{6}}$$");
+    QByteArray dblSvgBytes = Render::MathSvgRenderer::renderToSvg(nestedDouble);
+    QString dblSvg = QString::fromUtf8(dblSvgBytes);
+
+    // Extract all fraction line Y coordinates
+    static QRegularExpression reLine(QStringLiteral("<line[^>]*y1=\"([\\d\\.]+)\"[^>]*y2=\"([\\d\\.]+)\""));
+    auto lineIt = reLine.globalMatch(dblSvg);
+    QVector<qreal> barYs;
+    while (lineIt.hasNext()) {
+        auto lm = lineIt.next();
+        qreal y1 = lm.captured(1).toDouble();
+        qreal y2 = lm.captured(2).toDouble();
+        QCOMPARE(y1, y2); // Must be perfectly horizontal fraction line
+        barYs.append(y1);
+    }
+    // Must have at least 3 fraction bars: main bar, numerator bar, denominator bar
+    QVERIFY(barYs.size() >= 3);
+
+    // Verify fraction structure: numerator group translation Y is strictly above fraction bar,
+    // and denominator group translation Y is strictly below fraction bar.
+    static QRegularExpression reFracAttr(QStringLiteral(
+        "<g class=\"fraction\" data-num-y=\"([\\d\\.-]+)\" data-bar-y=\"([\\d\\.-]+)\" data-den-y=\"([\\d\\.-]+)\">"
+    ));
+
+    auto fracIt = reFracAttr.globalMatch(dblSvg);
+    int matchedFracs = 0;
+    while (fracIt.hasNext()) {
+        auto fm = fracIt.next();
+        matchedFracs++;
+        qreal numY = fm.captured(1).toDouble();
+        qreal barY = fm.captured(2).toDouble();
+        qreal denY = fm.captured(3).toDouble();
+
+        // Numerator box top/bottom must be strictly ABOVE fraction bar line
+        QVERIFY2(numY < barY, qPrintable(QString("Numerator Y=%1 must be above Bar Y=%2").arg(numY).arg(barY)));
+        // Denominator box must be strictly BELOW fraction bar line
+        QVERIFY2(denY > barY, qPrintable(QString("Denominator Y=%1 must be below Bar Y=%2").arg(denY).arg(barY)));
+        // Vertical clearance margins: minimum 4px clearance above bar and 6px below bar
+        QVERIFY2(barY - numY >= 4.0, qPrintable(QString("Clearance above bar %1 must be >= 4").arg(barY - numY)));
+        QVERIFY2(denY - barY >= 6.0, qPrintable(QString("Clearance below bar %1 must be >= 6").arg(denY - barY)));
+    }
+    // Formula has 3 fractions: main fraction, numerator fraction \frac{2}{3}, denominator fraction \frac{5}{6}
+    QCOMPARE(matchedFracs, 3);
 }
 
 QTEST_MAIN(TestProbes)

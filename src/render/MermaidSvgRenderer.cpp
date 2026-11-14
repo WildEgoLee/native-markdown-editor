@@ -424,10 +424,10 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
     qreal minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
 
     for (const auto &n : nodes) {
-        minX = std::min(minX, n.x - 12.0);
-        maxX = std::max(maxX, n.x + n.w + 12.0);
-        minY = std::min(minY, n.y - 12.0);
-        maxY = std::max(maxY, n.y + n.h + 12.0);
+        minX = std::min(minX, n.x);
+        maxX = std::max(maxX, n.x + n.w);
+        minY = std::min(minY, n.y);
+        maxY = std::max(maxY, n.y + n.h);
     }
 
     // Calculate edge extent in bounding box
@@ -437,26 +437,35 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
         const auto &n2 = nodes[e.to];
 
         if (e.from == e.to) {
-            minY = std::min(minY, n1.y - 36.0);
+            // Self loop curves upwards by 30px
+            minY = std::min(minY, n1.y - 34.0);
             continue;
         }
 
         bool isBack = backEdges.contains(qMakePair(e.from, e.to)) || (ranks.value(e.to, 0) <= ranks.value(e.from, 0));
         if (isBack) {
             if (isLR) {
-                qreal arcY = std::max(n1.y + n1.h, n2.y + n2.h) + 36.0;
-                maxY = std::max(maxY, arcY + 12.0);
+                qreal arcY = std::max(n1.y + n1.h, n2.y + n2.h) + 32.0;
+                maxY = std::max(maxY, arcY + 8.0);
             } else {
-                qreal arcX = std::max(n1.x + n1.w, n2.x + n2.w) + 38.0;
-                maxX = std::max(maxX, arcX + 12.0);
+                qreal arcX = std::max(n1.x + n1.w, n2.x + n2.w) + 35.0;
+                maxX = std::max(maxX, arcX + 8.0);
             }
         }
     }
 
-    minX = std::min(minX, 0.0);
-    minY = std::min(minY, 0.0);
-    qreal contentWidth = std::max(360.0, maxX - minX + 24.0);
-    qreal contentHeight = std::max(140.0, maxY - minY + 24.0);
+    // Ensure all elements have safe positive margins by shifting coordinates if needed
+    const qreal margin = 24.0;
+    qreal shiftX = (minX < margin) ? (margin - minX) : 0.0;
+    qreal shiftY = (minY < margin) ? (margin - minY) : 0.0;
+
+    for (auto &n : nodes) {
+        n.x += shiftX;
+        n.y += shiftY;
+    }
+
+    qreal contentWidth = std::max(360.0, (maxX + shiftX) + margin);
+    qreal contentHeight = std::max(140.0, (maxY + shiftY) + margin);
 
     qreal displayWidth = std::clamp(contentWidth, 360.0, 1400.0);
     qreal displayHeight = displayWidth * (contentHeight / contentWidth);

@@ -57,7 +57,10 @@ AsyncRenderService::~AsyncRenderService() {
         m_aliveToken->store(false);
     }
     m_threadPool.clear();
-    m_threadPool.waitForDone(5000);
+    bool finished = m_threadPool.waitForDone(5000);
+    if (!finished) {
+        qWarning("AsyncRenderService::~AsyncRenderService: thread pool did not finish within 5000ms");
+    }
 }
 
 AsyncRenderService *AsyncRenderService::instance() {
@@ -90,6 +93,9 @@ void AsyncRenderService::onRenderCompleted(const CacheKey &key, const QByteArray
 
             renderer = std::make_shared<QSvgRenderer>(svgData);
             m_rendererCache[key] = renderer;
+            qint64 byteSize = svgData.size();
+            m_rendererByteSizes[key] = byteSize;
+            m_totalCachedBytes += byteSize;
 
             if (m_pendingRequests.value(key, 0) == generation) {
                 m_pendingRequests.remove(key);
@@ -102,6 +108,7 @@ void AsyncRenderService::onRenderCompleted(const CacheKey &key, const QByteArray
             while (m_lruList.size() > m_maxCacheEntries) {
                 CacheKey oldest = m_lruList.takeLast();
                 m_rendererCache.remove(oldest);
+                m_totalCachedBytes -= m_rendererByteSizes.take(oldest);
             }
         }
 
@@ -125,16 +132,36 @@ int AsyncRenderService::cacheCount() const {
     return m_rendererCache.size();
 }
 
+int AsyncRenderService::maxCacheEntries() const {
+    QMutexLocker locker(&m_mutex);
+    return m_maxCacheEntries;
+}
+
+qint64 AsyncRenderService::totalCachedBytes() const {
+    QMutexLocker locker(&m_mutex);
+    return m_totalCachedBytes;
+}
+
+quint64 AsyncRenderService::currentGeneration() const {
+    QMutexLocker locker(&m_mutex);
+    return m_currentGeneration;
+}
+
 void AsyncRenderService::setMaxCacheEntries(int maxEntries) {
     QMutexLocker locker(&m_mutex);
     m_maxCacheEntries = std::max(4, maxEntries);
     while (m_lruList.size() > m_maxCacheEntries) {
         CacheKey oldest = m_lruList.takeLast();
         m_rendererCache.remove(oldest);
+        m_totalCachedBytes -= m_rendererByteSizes.take(oldest);
     }
 }
 
 std::shared_ptr<QSvgRenderer> AsyncRenderService::getRenderer(const QString &source, RenderKind kind, bool allowSyncFallback) {
+    if (m_isShuttingDown.load()) {
+        return nullptr;
+    }
+
     CacheKey key{kind, source};
     {
         QMutexLocker locker(&m_mutex);
@@ -153,11 +180,15 @@ std::shared_ptr<QSvgRenderer> AsyncRenderService::getRenderer(const QString &sou
         {
             QMutexLocker locker(&m_mutex);
             m_rendererCache[key] = renderer;
+            qint64 byteSize = svg.size();
+            m_rendererByteSizes[key] = byteSize;
+            m_totalCachedBytes += byteSize;
             m_lruList.removeAll(key);
             m_lruList.prepend(key);
             while (m_lruList.size() > m_maxCacheEntries) {
                 CacheKey oldest = m_lruList.takeLast();
                 m_rendererCache.remove(oldest);
+                m_totalCachedBytes -= m_rendererByteSizes.take(oldest);
             }
             m_pendingRequests.remove(key);
         }
@@ -194,6 +225,8 @@ void AsyncRenderService::clearCache() {
     QMutexLocker locker(&m_mutex);
     m_currentGeneration++;
     m_rendererCache.clear();
+    m_rendererByteSizes.clear();
+    m_totalCachedBytes = 0;
     m_lruList.clear();
     m_pendingRequests.clear();
     m_threadPool.clear();

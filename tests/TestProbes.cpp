@@ -2547,7 +2547,7 @@ void TestProbes::testNestedFractionGeometryAndHierarchy() {
     QCOMPARE(matchedFracs, 3);
 }
 
-// Probe 42: P0 First-run async render task scheduling, sync/async byte tracking, and memory budget
+// Probe 42: P0 First-run async render task scheduling, deterministic sync/async byte tracking, and byte budget eviction
 void TestProbes::testFirstRunAsyncRenderReliabilityAndByteBudget() {
     // 1. Fresh service instance without clearCache()
     auto isolated = std::make_unique<Render::AsyncRenderService>();
@@ -2572,36 +2572,58 @@ void TestProbes::testFirstRunAsyncRenderReliabilityAndByteBudget() {
     QVERIFY(!isolated->isPending(formula, Render::RenderKind::Math));
     QVERIFY(isolated->totalCachedBytes() > 0);
 
-    // 2. Interleaved Sync fallback and Async completion byte-counting verification
-    QString f2 = QStringLiteral("$$E=\\hbar\\omega$$");
-    isolated->requestRender(f2, Render::RenderKind::Math);
+    // 2. Deterministic Sync fallback and Async callback interleaving byte-counting verification
+    Render::CacheKey key{Render::RenderKind::Math, QStringLiteral("$$E=\\hbar\\omega$$")};
+    quint64 gen = isolated->currentGeneration();
 
-    // Simultaneous sync fallback before worker finishes
-    auto syncRenderer = isolated->getRenderer(f2, Render::RenderKind::Math, true);
+    // Step A: Synchronous fallback writes to cache first
+    auto syncRenderer = isolated->getRenderer(key.source, key.kind, true);
     QVERIFY(syncRenderer != nullptr);
-    qint64 bytesAfterSync = isolated->totalCachedBytes();
+    qint64 syncBytes = isolated->totalCachedBytes();
+    QVERIFY(syncBytes > 0);
 
-    // Allow worker task to finish and call onRenderCompleted
-    QTest::qWait(100);
+    // Step B: Out-of-order / delayed async callback arrives now with updated/identical SVG
+    QByteArray asyncSvg = Render::MathSvgRenderer::renderToSvg(key.source);
+    isolated->onRenderCompleted(key, asyncSvg, gen);
     QCoreApplication::processEvents();
 
-    // Cache byte count must remain exact and not double counted
-    QCOMPARE(isolated->totalCachedBytes(), bytesAfterSync);
+    // Cache byte count must remain exact and NOT be duplicated!
+    QCOMPARE(isolated->totalCachedBytes(), syncBytes);
 
-    // 3. Dual LRU and byte budget enforcement
-    isolated->setMaxCacheBytes(1024 * 1024); // 1 MB limit
-    for (int i = 0; i < 30; ++i) {
-        QString f = QStringLiteral("$$\\int_0^{%1} \\sin(x) dx$$").arg(i);
-        isolated->getRenderer(f, Render::RenderKind::Math, true);
-    }
+    // 3. Real Byte-limit LRU eviction verification
+    QString chart1 = QStringLiteral("graph LR\nN1[Node 1 Alpha] --> N2[Node 2 Beta] --> N3[Node 3 Gamma]");
+    QString chart2 = QStringLiteral("graph LR\nN4[Node 4 Delta] --> N5[Node 5 Epsilon] --> N6[Node 6 Zeta]");
+    qint64 size1 = Render::MermaidSvgRenderer::renderToSvg(chart1).size();
+
+    // Set budget strictly enough to hold chart1, but not both chart1 + chart2
+    isolated->setMaxCacheBytes(size1 + 50);
+    QCOMPARE(isolated->maxCacheBytes(), size1 + 50);
+
+    // Insert chart1
+    isolated->getRenderer(chart1, Render::RenderKind::Mermaid, true);
+    QVERIFY(isolated->isCached(chart1, Render::RenderKind::Mermaid));
+    QCOMPARE(isolated->cacheCount(), 1);
+
+    // Insert chart2 -> total bytes exceed budget, so chart1 MUST be evicted!
+    isolated->getRenderer(chart2, Render::RenderKind::Mermaid, true);
 
     QVERIFY(isolated->totalCachedBytes() <= isolated->maxCacheBytes());
-    QVERIFY(isolated->cacheCount() <= isolated->maxCacheEntries());
+    QVERIFY(!isolated->isCached(chart1, Render::RenderKind::Mermaid));
+    QVERIFY(isolated->isCached(chart2, Render::RenderKind::Mermaid));
+
+    // 4. Single oversized diagram preservation (no thrashing loop)
+    // Set budget smaller than a single chart
+    isolated->setMaxCacheBytes(1024); // 1 KB
+    isolated->getRenderer(chart1, Render::RenderKind::Mermaid, true);
+
+    // Cache retains exactly 1 active item, totalCachedBytes is preserved, no infinite eviction
+    QCOMPARE(isolated->cacheCount(), 1);
+    QVERIFY(isolated->isCached(chart1, Render::RenderKind::Mermaid));
 }
 
-// Probe 43: P1 First-run cold document GUI integration and diverse Mermaid boundaries
+// Probe 43: P1 Real-world GUI cold start with NativeEditorView, exact embeddedSource keys, and interactive editing
 void TestProbes::testFirstRunDocumentGuiIntegration() {
-    // 1. First-run Cold Document Rendering with LaTeX and Mermaid without manual clearCache()
+    // 1. Cold Document AST & DisplayProjection: verify embeddedSource keys
     QString doc = QStringLiteral(
         "# Cold First-Run Physics Notes\n\n"
         "Newtonian mechanics foundation:\n\n"
@@ -2623,35 +2645,75 @@ void TestProbes::testFirstRunDocumentGuiIntegration() {
 
     Mapping::DisplayProjection proj;
     proj.buildProjection(astRoot, buffer, 0, false);
-    QVERIFY(proj.blockCount() >= 5);
 
-    Editor::LayoutEngine engine;
-    engine.layout(proj, 850.0);
+    // Extract exact embeddedSource keys from projection blocks
+    QString mathSource1, mathSource2, mermaidSource;
+    for (int i = 0; i < proj.blockCount(); ++i) {
+        const auto &b = proj.blocks()[i];
+        if (b.isMathBlock) {
+            if (mathSource1.isEmpty()) mathSource1 = b.embeddedSource;
+            else if (mathSource2.isEmpty()) mathSource2 = b.embeddedSource;
+        } else if (b.isMermaidBlock) {
+            mermaidSource = b.embeddedSource;
+        }
+    }
 
-    // Request cold async render for all detected math and mermaid blocks
+    // Crucial assertion: math embeddedSource must NOT contain $$ delimiters
+    QVERIFY(!mathSource1.isEmpty());
+    QVERIFY(!mathSource1.startsWith(QStringLiteral("$$")));
+    QVERIFY(mathSource1.contains(QStringLiteral("\\frac{d\\mathbf{p}}{dt}")));
+    QVERIFY(!mathSource2.isEmpty());
+    QVERIFY(!mathSource2.startsWith(QStringLiteral("$$")));
+    QVERIFY(!mermaidSource.isEmpty());
+    QVERIFY(mermaidSource.contains(QStringLiteral("graph LR")));
+
+    // 2. Real NativeEditorView window cold startup and event loop rendering
+    Editor::NativeEditorView editorView;
+    editorView.resize(960, 720);
+    editorView.buffer().setText(doc);
+    editorView.show();
+    QCoreApplication::processEvents();
+
+    // Trigger initial viewport rendering
+    QPixmap initialPix(960, 720);
+    editorView.render(&initialPix);
+
+    // Wait for background workers to finish and trigger renderReady -> viewport update
     auto service = Render::AsyncRenderService::instance();
     QVERIFY(service != nullptr);
 
-    QString f1 = QStringLiteral("$$\\mathbf{F} = \\frac{d\\mathbf{p}}{dt}$$");
-    QString f2 = QStringLiteral("$$E = \\sqrt{(pc)^2 + (m_0 c^2)^2}$$");
-    service->requestRender(f1, Render::RenderKind::Math);
-    service->requestRender(f2, Render::RenderKind::Math);
-
-    // Allow workers to complete
-    QTest::qWait(300);
+    QTest::qWait(350);
     QCoreApplication::processEvents();
 
-    QVERIFY(service->isCached(f1, Render::RenderKind::Math));
-    QVERIFY(service->isCached(f2, Render::RenderKind::Math));
+    // Both math formulas and mermaid diagram MUST be cached with their exact embeddedSource keys
+    QVERIFY(service->isCached(mathSource1, Render::RenderKind::Math));
+    QVERIFY(service->isCached(mathSource2, Render::RenderKind::Math));
+    QVERIFY(service->isCached(mermaidSource, Render::RenderKind::Mermaid));
 
-    // Paint to 1080p offscreen surface without crash or layout glitches
-    QImage offscreen(1920, 1080, QImage::Format_ARGB32_Premultiplied);
-    offscreen.fill(Qt::white);
-    QPainter painter(&offscreen);
-    engine.paint(&painter, QRectF(0, 0, 850.0, 1080.0), proj, -1, -1);
-    painter.end();
+    // Render viewport again; all cards must now render with valid SVG
+    QPixmap finalPix(960, 720);
+    editorView.render(&finalPix);
 
-    // 2. Diverse Mermaid Boundaries: Long Labels, Cyclic Feedback, and Chain Arrows
+    // 3. Interactive in-place editing & Undo regression in Math Block
+    int mathOffset = doc.indexOf(QStringLiteral("\\mathbf{F}"));
+    QVERIFY(mathOffset > 0);
+
+    // Place cursor inside math formula
+    editorView.setCursorPos(mathOffset + 2);
+    QCoreApplication::processEvents();
+
+    // Type character edit
+    QKeyEvent keyEvent(QEvent::KeyPress, Qt::Key_X, Qt::NoModifier, QStringLiteral("x"));
+    QApplication::sendEvent(editorView.viewport(), &keyEvent);
+    QCoreApplication::processEvents();
+    QVERIFY(editorView.buffer().text().contains(QStringLiteral("x")));
+
+    // Undo edit
+    editorView.undo();
+    QCoreApplication::processEvents();
+    QCOMPARE(editorView.buffer().text(), doc);
+
+    // 4. Diverse Mermaid Boundaries: Long Labels, Cyclic Feedback, and Chain Arrows
     QString diverseMermaid = QStringLiteral(
         "graph LR\n"
         "ComponentWithVeryLongDescriptiveArchitecturalLabel[Very Long Descriptive System Component Name] --> ShortNode[Core Kernel]\n"
@@ -2668,7 +2730,6 @@ void TestProbes::testFirstRunDocumentGuiIntegration() {
     qreal vbW = m.captured(1).toDouble();
     qreal vbH = m.captured(2).toDouble();
 
-    // Wide diagram with long labels must comfortably accommodate text
     QVERIFY(vbW >= 600.0);
     QVERIFY(vbH >= 120.0);
 

@@ -112,7 +112,12 @@ void AsyncRenderService::onRenderCompleted(const CacheKey &key, const QByteArray
             m_lruList.removeAll(key);
             m_lruList.prepend(key);
 
-            while (!m_lruList.isEmpty() && (m_lruList.size() > m_maxCacheEntries || m_totalCachedBytes > m_maxCacheBytes)) {
+            while (!m_lruList.isEmpty() && m_lruList.size() > m_maxCacheEntries) {
+                CacheKey oldest = m_lruList.takeLast();
+                m_rendererCache.remove(oldest);
+                m_totalCachedBytes -= m_rendererByteSizes.take(oldest);
+            }
+            while (m_lruList.size() > 1 && m_totalCachedBytes > m_maxCacheBytes) {
                 CacheKey oldest = m_lruList.takeLast();
                 m_rendererCache.remove(oldest);
                 m_totalCachedBytes -= m_rendererByteSizes.take(oldest);
@@ -163,7 +168,12 @@ quint64 AsyncRenderService::currentGeneration() const {
 void AsyncRenderService::setMaxCacheEntries(int maxEntries) {
     QMutexLocker locker(&m_mutex);
     m_maxCacheEntries = std::max(4, maxEntries);
-    while (!m_lruList.isEmpty() && (m_lruList.size() > m_maxCacheEntries || m_totalCachedBytes > m_maxCacheBytes)) {
+    while (!m_lruList.isEmpty() && m_lruList.size() > m_maxCacheEntries) {
+        CacheKey oldest = m_lruList.takeLast();
+        m_rendererCache.remove(oldest);
+        m_totalCachedBytes -= m_rendererByteSizes.take(oldest);
+    }
+    while (m_lruList.size() > 1 && m_totalCachedBytes > m_maxCacheBytes) {
         CacheKey oldest = m_lruList.takeLast();
         m_rendererCache.remove(oldest);
         m_totalCachedBytes -= m_rendererByteSizes.take(oldest);
@@ -172,8 +182,13 @@ void AsyncRenderService::setMaxCacheEntries(int maxEntries) {
 
 void AsyncRenderService::setMaxCacheBytes(qint64 maxBytes) {
     QMutexLocker locker(&m_mutex);
-    m_maxCacheBytes = std::max<qint64>(1024 * 1024, maxBytes);
-    while (!m_lruList.isEmpty() && (m_lruList.size() > m_maxCacheEntries || m_totalCachedBytes > m_maxCacheBytes)) {
+    m_maxCacheBytes = std::max<qint64>(1024, maxBytes);
+    while (!m_lruList.isEmpty() && m_lruList.size() > m_maxCacheEntries) {
+        CacheKey oldest = m_lruList.takeLast();
+        m_rendererCache.remove(oldest);
+        m_totalCachedBytes -= m_rendererByteSizes.take(oldest);
+    }
+    while (m_lruList.size() > 1 && m_totalCachedBytes > m_maxCacheBytes) {
         CacheKey oldest = m_lruList.takeLast();
         m_rendererCache.remove(oldest);
         m_totalCachedBytes -= m_rendererByteSizes.take(oldest);
@@ -211,7 +226,12 @@ std::shared_ptr<QSvgRenderer> AsyncRenderService::getRenderer(const QString &sou
             m_totalCachedBytes += byteSize;
             m_lruList.removeAll(key);
             m_lruList.prepend(key);
-            while (!m_lruList.isEmpty() && (m_lruList.size() > m_maxCacheEntries || m_totalCachedBytes > m_maxCacheBytes)) {
+            while (!m_lruList.isEmpty() && m_lruList.size() > m_maxCacheEntries) {
+                CacheKey oldest = m_lruList.takeLast();
+                m_rendererCache.remove(oldest);
+                m_totalCachedBytes -= m_rendererByteSizes.take(oldest);
+            }
+            while (m_lruList.size() > 1 && m_totalCachedBytes > m_maxCacheBytes) {
                 CacheKey oldest = m_lruList.takeLast();
                 m_rendererCache.remove(oldest);
                 m_totalCachedBytes -= m_rendererByteSizes.take(oldest);

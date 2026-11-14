@@ -1,6 +1,7 @@
 #pragma once
 
 #include "editor/NativeEditorView.h"
+#include "file/DocumentSession.h"
 #include "SidebarWidget.h"
 
 #include <QMainWindow>
@@ -52,8 +53,7 @@ private:
     QLabel *m_statusModeLabel = nullptr;
     QLabel *m_statusDirtyLabel = nullptr;
 
-    QString m_currentFilePath;
-    QByteArray m_lastKnownHash;
+    File::DocumentSession m_session;
     QTimer *m_recoveryTimer = nullptr;
 };
 

@@ -136,17 +136,48 @@ static QString getRecoveryFileName(const QString &originalFilePath) {
     return QStringLiteral("rec_%1.md").arg(QString::fromUtf8(hash));
 }
 
-void FileService::writeRecoverySnapshot(const QString &originalFilePath, const Core::TextBuffer &buffer) {
+bool FileService::writeRecoverySnapshot(const QString &originalFilePath, const Core::TextBuffer &buffer) {
     if (originalFilePath.isEmpty()) {
-        return;
+        return false;
     }
-    QString recPath = QDir(recoveryDirectory()).filePath(getRecoveryFileName(originalFilePath));
-    QFile file(recPath);
-    if (file.open(QIODevice::WriteOnly)) {
-        file.write(buffer.toBytes());
-        file.flush();
+    QString recDir = recoveryDirectory();
+    QString targetRecPath = QDir(recDir).filePath(getRecoveryFileName(originalFilePath));
+    QString tempRecPath = targetRecPath + QStringLiteral(".tmp_%1").arg(QRandomGenerator::global()->generate());
+
+    QFile file(tempRecPath);
+    if (!file.open(QIODevice::WriteOnly)) {
+        return false;
+    }
+
+    QByteArray data = buffer.toBytes();
+    qint64 written = file.write(data);
+    if (written != data.size()) {
         file.close();
+        file.remove();
+        return false;
     }
+
+    file.flush();
+    file.close();
+
+#ifdef Q_OS_WIN
+    std::wstring wTemp = tempRecPath.toStdWString();
+    std::wstring wTarget = targetRecPath.toStdWString();
+    BOOL ok = MoveFileExW(wTemp.c_str(), wTarget.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    if (!ok) {
+        file.remove();
+        return false;
+    }
+#else
+    if (QFile::exists(targetRecPath)) {
+        QFile::remove(targetRecPath);
+    }
+    if (!QFile::rename(tempRecPath, targetRecPath)) {
+        file.remove();
+        return false;
+    }
+#endif
+    return true;
 }
 
 void FileService::removeRecoverySnapshot(const QString &originalFilePath) {

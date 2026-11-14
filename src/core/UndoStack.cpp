@@ -8,10 +8,10 @@ UndoStack::UndoStack(QObject *parent)
 }
 
 void UndoStack::clear() {
-    m_undoList.clear();
-    m_redoList.clear();
-    m_savedCheckpointRevision = 0;
-    m_hasSavedCheckpoint = false;
+    m_commands.clear();
+    m_index = 0;
+    m_cleanIndex = 0;
+    m_mergeGroupActive = true;
     m_wasClean = true;
 
     emit canUndoChanged(false);
@@ -24,41 +24,45 @@ void UndoStack::push(const EditTransaction &transaction, TextBuffer &buffer) {
         return;
     }
 
-    EditTransaction tx = transaction;
-    tx.setRevisionBefore(buffer.revision());
-
-    // Attempt to merge with top of undo list
-    if (!m_undoList.isEmpty() && m_undoList.last().canMergeWith(tx)) {
-        // Apply edits to buffer
-        for (const auto &edit : tx.edits()) {
+    // Try to merge if merge group is active and cursor is at end of stack
+    if (m_mergeGroupActive && m_index > 0 && m_index == m_commands.size() && m_commands[m_index - 1].canMergeWith(transaction)) {
+        for (const auto &edit : transaction.edits()) {
             buffer.replace(edit.offset, edit.oldText.length(), edit.newText);
         }
-        m_undoList.last().merge(tx);
-        m_undoList.last().setRevisionAfter(buffer.revision());
+        m_commands[m_index - 1].merge(transaction);
     } else {
+        // Discard future redo branch if branching from past undo state
+        if (m_index < m_commands.size()) {
+            if (m_cleanIndex > m_index) {
+                // Checkpoint was on the discarded branch, can never return to it
+                m_cleanIndex = -1;
+            }
+            m_commands.resize(m_index);
+        }
+
         // Apply edits to buffer
-        for (const auto &edit : tx.edits()) {
+        for (const auto &edit : transaction.edits()) {
             buffer.replace(edit.offset, edit.oldText.length(), edit.newText);
         }
-        tx.setRevisionAfter(buffer.revision());
-        m_undoList.append(tx);
-        emit canUndoChanged(true);
+
+        m_commands.append(transaction);
+        ++m_index;
+        m_mergeGroupActive = true;
     }
 
-    if (!m_redoList.isEmpty()) {
-        m_redoList.clear();
-        emit canRedoChanged(false);
-    }
-
-    checkCleanState(buffer.revision());
+    emit canUndoChanged(canUndo());
+    emit canRedoChanged(canRedo());
+    checkCleanState();
 }
 
 bool UndoStack::undo(TextBuffer &buffer, SelectionState &outSelection) {
-    if (m_undoList.isEmpty()) {
+    if (m_index <= 0) {
         return false;
     }
 
-    EditTransaction tx = m_undoList.takeLast();
+    breakMergeGroup();
+
+    const EditTransaction &tx = m_commands[m_index - 1];
 
     // Revert edits in reverse order
     const auto &edits = tx.edits();
@@ -67,26 +71,23 @@ bool UndoStack::undo(TextBuffer &buffer, SelectionState &outSelection) {
         buffer.replace(edit.offset, edit.newText.length(), edit.oldText);
     }
 
-    buffer.setRevision(tx.revisionBefore());
     outSelection = tx.selectionBefore();
+    --m_index;
 
-    m_redoList.append(tx);
-
-    if (m_undoList.isEmpty()) {
-        emit canUndoChanged(false);
-    }
-    emit canRedoChanged(true);
-
-    checkCleanState(buffer.revision());
+    emit canUndoChanged(canUndo());
+    emit canRedoChanged(canRedo());
+    checkCleanState();
     return true;
 }
 
 bool UndoStack::redo(TextBuffer &buffer, SelectionState &outSelection) {
-    if (m_redoList.isEmpty()) {
+    if (m_index >= m_commands.size()) {
         return false;
     }
 
-    EditTransaction tx = m_redoList.takeLast();
+    breakMergeGroup();
+
+    const EditTransaction &tx = m_commands[m_index];
 
     // Re-apply edits in forward order
     const auto &edits = tx.edits();
@@ -95,35 +96,31 @@ bool UndoStack::redo(TextBuffer &buffer, SelectionState &outSelection) {
         buffer.replace(edit.offset, edit.oldText.length(), edit.newText);
     }
 
-    buffer.setRevision(tx.revisionAfter());
     outSelection = tx.selectionAfter();
+    ++m_index;
 
-    m_undoList.append(tx);
-
-    if (m_redoList.isEmpty()) {
-        emit canRedoChanged(false);
-    }
-    emit canUndoChanged(true);
-
-    checkCleanState(buffer.revision());
+    emit canUndoChanged(canUndo());
+    emit canRedoChanged(canRedo());
+    checkCleanState();
     return true;
 }
 
-void UndoStack::setSaveCheckpoint(quint64 revision) {
-    m_savedCheckpointRevision = revision;
-    m_hasSavedCheckpoint = true;
-    checkCleanState(revision);
+void UndoStack::setSaveCheckpoint() {
+    m_cleanIndex = m_index;
+    breakMergeGroup();
+    checkCleanState();
 }
 
-bool UndoStack::isDirty(quint64 currentRevision) const {
-    if (!m_hasSavedCheckpoint) {
-        return currentRevision > 0;
-    }
-    return currentRevision != m_savedCheckpointRevision;
+void UndoStack::breakMergeGroup() {
+    m_mergeGroupActive = false;
 }
 
-void UndoStack::checkCleanState(quint64 currentRevision) {
-    bool clean = !isDirty(currentRevision);
+bool UndoStack::isDirty() const {
+    return m_index != m_cleanIndex;
+}
+
+void UndoStack::checkCleanState() {
+    bool clean = !isDirty();
     if (clean != m_wasClean) {
         m_wasClean = clean;
         emit cleanStateChanged(clean);

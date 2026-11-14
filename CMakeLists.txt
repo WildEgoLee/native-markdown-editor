@@ -44,6 +44,7 @@ set(CORE_SOURCES
 
     src/file/FileService.h
     src/file/FileService.cpp
+    src/file/DocumentSession.h
 
     src/ui/OutlineWidget.h
     src/ui/OutlineWidget.cpp

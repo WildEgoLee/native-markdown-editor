@@ -18,13 +18,17 @@ public:
     bool undo(TextBuffer &buffer, SelectionState &outSelection);
     bool redo(TextBuffer &buffer, SelectionState &outSelection);
 
-    bool canUndo() const { return !m_undoList.isEmpty(); }
-    bool canRedo() const { return !m_redoList.isEmpty(); }
+    bool canUndo() const { return m_index > 0; }
+    bool canRedo() const { return m_index < m_commands.size(); }
 
     void clear();
 
-    void setSaveCheckpoint(quint64 revision);
-    bool isDirty(quint64 currentRevision) const;
+    void setSaveCheckpoint();
+    void breakMergeGroup();
+    bool isDirty() const;
+
+    int index() const { return m_index; }
+    int cleanIndex() const { return m_cleanIndex; }
 
 signals:
     void canUndoChanged(bool canUndo);
@@ -32,13 +36,12 @@ signals:
     void cleanStateChanged(bool isClean);
 
 private:
-    void checkCleanState(quint64 currentRevision);
+    void checkCleanState();
 
-    QVector<EditTransaction> m_undoList;
-    QVector<EditTransaction> m_redoList;
-
-    quint64 m_savedCheckpointRevision = 0;
-    bool m_hasSavedCheckpoint = false;
+    QVector<EditTransaction> m_commands;
+    int m_index = 0;
+    int m_cleanIndex = 0;
+    bool m_mergeGroupActive = true;
     bool m_wasClean = true;
 };
 

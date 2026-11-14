@@ -26,6 +26,9 @@ private slots:
     void testCrashRecoverySnapshot();
     void testHiddenMarkerCursorStepping();
     void testFindAndBatchReplaceUndo();
+    void testUndoBranchSafetyAndSavepoints();
+    void testSaveBreaksMergeGroup();
+    void testExactSourceModeProjection();
 };
 
 // Probe 1: UTF-8 BOM, CRLF, trailing spaces, no-newline exact byte-for-byte invariance
@@ -98,8 +101,8 @@ void TestProbes::testUndoRedoAndCleanState() {
     buffer.setText(QStringLiteral("初始文本"));
 
     Core::UndoStack stack;
-    stack.setSaveCheckpoint(buffer.revision());
-    QVERIFY(!stack.isDirty(buffer.revision()));
+    stack.setSaveCheckpoint();
+    QVERIFY(!stack.isDirty());
 
     // Edit 1: append "，第二段"
     Core::EditTransaction tx1;
@@ -110,7 +113,7 @@ void TestProbes::testUndoRedoAndCleanState() {
     stack.push(tx1, buffer);
 
     QCOMPARE(buffer.text(), QStringLiteral("初始文本，第二段"));
-    QVERIFY(stack.isDirty(buffer.revision()));
+    QVERIFY(stack.isDirty());
     QVERIFY(stack.canUndo());
 
     // Undo -> back to initial
@@ -120,14 +123,14 @@ void TestProbes::testUndoRedoAndCleanState() {
     QCOMPARE(buffer.text(), QStringLiteral("初始文本"));
     QCOMPARE(sel.cursor, 4);
     // Returned to checkpoint -> must be clean!
-    QVERIFY(!stack.isDirty(buffer.revision()));
+    QVERIFY(!stack.isDirty());
 
     // Redo -> forward to modified
     bool okRedo = stack.redo(buffer, sel);
     QVERIFY(okRedo);
     QCOMPARE(buffer.text(), QStringLiteral("初始文本，第二段"));
     QCOMPARE(sel.cursor, 8);
-    QVERIFY(stack.isDirty(buffer.revision()));
+    QVERIFY(stack.isDirty());
 }
 
 // Probe 4: Parser AST and Syntax range mapping
@@ -308,7 +311,7 @@ void TestProbes::testFindAndBatchReplaceUndo() {
     buffer.setText(QStringLiteral("苹果很好吃，我喜欢苹果，大家都爱苹果。"));
 
     Core::UndoStack stack;
-    stack.setSaveCheckpoint(buffer.revision());
+    stack.setSaveCheckpoint();
 
     // Batch replace "苹果" with "香蕉" in a compound transaction
     QString findStr = QStringLiteral("苹果");
@@ -331,14 +334,114 @@ void TestProbes::testFindAndBatchReplaceUndo() {
     stack.push(tx, buffer);
 
     QCOMPARE(buffer.text(), QStringLiteral("香蕉很好吃，我喜欢香蕉，大家都爱香蕉。"));
-    QVERIFY(stack.isDirty(buffer.revision()));
+    QVERIFY(stack.isDirty());
 
     // One single undo must revert all 3 replacements at once back to baseline!
     Core::SelectionState sel;
     bool okUndo = stack.undo(buffer, sel);
     QVERIFY(okUndo);
     QCOMPARE(buffer.text(), QStringLiteral("苹果很好吃，我喜欢苹果，大家都爱苹果。"));
-    QVERIFY(!stack.isDirty(buffer.revision())); // back to clean state
+    QVERIFY(!stack.isDirty()); // back to clean state
+}
+
+// Probe 10: Undo branch safety (Save A -> Modify B -> Undo to A -> Branch Modify C)
+void TestProbes::testUndoBranchSafetyAndSavepoints() {
+    Core::TextBuffer buffer;
+    buffer.setText(QStringLiteral("版本A"));
+
+    Core::UndoStack stack;
+    stack.setSaveCheckpoint();
+    QVERIFY(!stack.isDirty());
+
+    // Step B: Append "修改B"
+    Core::EditTransaction txB;
+    txB.addEdit(3, QString(), QStringLiteral("-修改B"));
+    stack.push(txB, buffer);
+    QCOMPARE(buffer.text(), QStringLiteral("版本A-修改B"));
+    QVERIFY(stack.isDirty());
+
+    // Undo back to A
+    Core::SelectionState sel;
+    QVERIFY(stack.undo(buffer, sel));
+    QCOMPARE(buffer.text(), QStringLiteral("版本A"));
+    // Exactly at savepoint -> Clean!
+    QVERIFY(!stack.isDirty());
+
+    // Branch Step C: Append "修改C" (discards redo branch)
+    Core::EditTransaction txC;
+    txC.addEdit(3, QString(), QStringLiteral("-修改C"));
+    stack.push(txC, buffer);
+    QCOMPARE(buffer.text(), QStringLiteral("版本A-修改C"));
+    // Must be Dirty! (Must NEVER mistakenly match savepoint)
+    QVERIFY(stack.isDirty());
+
+    // Undo back to A again
+    QVERIFY(stack.undo(buffer, sel));
+    QCOMPARE(buffer.text(), QStringLiteral("版本A"));
+    QVERIFY(!stack.isDirty());
+}
+
+// Probe 11: Save checkpoint breaks continuous merge group
+void TestProbes::testSaveBreaksMergeGroup() {
+    Core::TextBuffer buffer;
+    buffer.setText(QString());
+
+    Core::UndoStack stack;
+
+    // Type 'a'
+    Core::EditTransaction tx1;
+    tx1.addEdit(0, QString(), QStringLiteral("a"));
+    tx1.setTimestamp(100);
+    stack.push(tx1, buffer);
+
+    // Save checkpoint at 'a'
+    stack.setSaveCheckpoint();
+    QVERIFY(!stack.isDirty());
+
+    // Type 'b' immediately (even if within 100ms)
+    Core::EditTransaction tx2;
+    tx2.addEdit(1, QString(), QStringLiteral("b"));
+    tx2.setTimestamp(150);
+    stack.push(tx2, buffer);
+
+    QCOMPARE(buffer.text(), QStringLiteral("ab"));
+    QVERIFY(stack.isDirty());
+
+    // Undo must ONLY revert 'b' back to saved checkpoint 'a', NEVER revert the whole merged group!
+    Core::SelectionState sel;
+    QVERIFY(stack.undo(buffer, sel));
+    QCOMPARE(buffer.text(), QStringLiteral("a"));
+    QVERIFY(!stack.isDirty()); // perfectly clean at savepoint!
+}
+
+// Probe 12: Source mode 100% exact raw projection
+void TestProbes::testExactSourceModeProjection() {
+    Core::TextBuffer buffer;
+    // An unfinished code block and weird indentation
+    QString raw = QStringLiteral("```python\ndef test():\n    print('hello')\n");
+    buffer.setText(raw);
+
+    Parser::MarkdownParserAdapter parser;
+    auto root = parser.parse(buffer);
+
+    Mapping::DisplayProjection projection;
+    projection.buildProjection(root, buffer, 0, true); // true = isSourceMode
+
+    // Source mode must exactly match each line of raw buffer without stripping backticks or fences
+    QString reconstructed;
+    for (int i = 0; i < projection.blockCount(); ++i) {
+        if (i > 0) reconstructed.append(QStringLiteral("\n"));
+        reconstructed.append(projection.blocks()[i].visualText);
+    }
+
+    QCOMPARE(reconstructed.trimmed(), raw.trimmed());
+
+    // First block visualText must be "```python"
+    QCOMPARE(projection.blocks()[0].visualText, QStringLiteral("```python"));
+    // Second block visualText must be "def test():"
+    QCOMPARE(projection.blocks()[1].visualText, QStringLiteral("def test():"));
+    // Third block visualText must preserve the 4 spaces: "    print('hello')"
+    QCOMPARE(projection.blocks()[2].visualText, QStringLiteral("    print('hello')"));
 }
 
 QTEST_MAIN(TestProbes)

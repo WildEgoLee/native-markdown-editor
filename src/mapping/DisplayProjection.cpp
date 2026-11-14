@@ -280,9 +280,67 @@ void DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
 {
     m_blocks.clear();
 
-    if (!rootNode || buffer.isEmpty()) {
+    if (buffer.isEmpty()) {
         VisualBlock emptyBlock;
         emptyBlock.sourceRange = Core::SourceRange(0, 0);
+        m_blocks.append(emptyBlock);
+        return;
+    }
+
+    if (isSourceMode) {
+        // Direct 1:1 raw source projection from TextBuffer (P0-04)
+        // No AST loss: every single character, whitespace, fence and newline is exactly preserved!
+        QTextCharFormat monoFormat;
+        monoFormat.setFontFamilies({QStringLiteral("Consolas"), QStringLiteral("Courier New"), QStringLiteral("monospace")});
+        monoFormat.setFontPointSize(12);
+        monoFormat.setForeground(QColor(36, 41, 47));
+
+        const auto &translator = buffer.positionTranslator();
+        int totalLines = translator.lineCount();
+        const QString &fullText = buffer.text();
+
+        for (int l = 0; l < totalLines; ++l) {
+            int lineStart = translator.lineStartOffset(l);
+            int lineEndWithNl = translator.lineEndOffset(l, fullText, true);
+            int lineEndNoNl = translator.lineEndOffset(l, fullText, false);
+
+            VisualBlock lineBlock;
+            lineBlock.blockType = Parser::NodeType::Paragraph;
+            lineBlock.sourceRange = Core::SourceRange(lineStart, lineEndWithNl);
+            lineBlock.visualText = fullText.mid(lineStart, lineEndNoNl - lineStart);
+            lineBlock.marginTop = 1;
+            lineBlock.marginBottom = 1;
+
+            VisualSegment seg;
+            seg.sourceRange = Core::SourceRange(lineStart, lineEndNoNl);
+            seg.visualStart = 0;
+            seg.visualLength = lineBlock.visualText.length();
+            seg.type = SegmentType::NormalText;
+            seg.format = monoFormat;
+
+            lineBlock.segments.append(seg);
+            m_blocks.append(lineBlock);
+        }
+
+        if (m_blocks.isEmpty()) {
+            VisualBlock emptyBlock;
+            emptyBlock.sourceRange = Core::SourceRange(0, 0);
+            m_blocks.append(emptyBlock);
+        }
+        return;
+    }
+
+    if (!rootNode) {
+        VisualBlock emptyBlock;
+        emptyBlock.sourceRange = Core::SourceRange(0, buffer.length());
+        emptyBlock.visualText = buffer.text();
+        VisualSegment seg;
+        seg.sourceRange = emptyBlock.sourceRange;
+        seg.text = emptyBlock.visualText;
+        seg.visualStart = 0;
+        seg.visualLength = seg.text.length();
+        seg.type = SegmentType::NormalText;
+        emptyBlock.segments.append(seg);
         m_blocks.append(emptyBlock);
         return;
     }

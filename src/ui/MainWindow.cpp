@@ -229,8 +229,8 @@ void MainWindow::setupMenusAndToolbars() {
 }
 
 void MainWindow::updateTitle() {
-    QString title = m_currentFilePath.isEmpty() ? QStringLiteral("未命名文档") : QFileInfo(m_currentFilePath).fileName();
-    if (m_editorView->undoStack().isDirty(m_editorView->buffer().revision())) {
+    QString title = m_session.displayName();
+    if (m_editorView->undoStack().isDirty()) {
         title.prepend(QStringLiteral("* "));
     }
     title.append(QStringLiteral(" - Windows 原生 Markdown 编辑器"));
@@ -253,8 +253,8 @@ void MainWindow::onCleanStateChanged(bool isClean) {
 }
 
 void MainWindow::onRecoveryTimer() {
-    if (!m_currentFilePath.isEmpty() && m_editorView->undoStack().isDirty(m_editorView->buffer().revision())) {
-        File::FileService::writeRecoverySnapshot(m_currentFilePath, m_editorView->buffer());
+    if (!m_session.isUntitled() && m_editorView->undoStack().isDirty()) {
+        File::FileService::writeRecoverySnapshot(m_session.filePath(), m_editorView->buffer());
     }
 }
 
@@ -262,17 +262,13 @@ void MainWindow::newFile() {
     if (!maybeSave()) {
         return;
     }
-    m_editorView->buffer().setText(QString());
+    m_session.resetToUntitled(m_editorView->buffer());
     m_editorView->undoStack().clear();
-    m_currentFilePath.clear();
-    m_lastKnownHash.clear();
+    m_editorView->undoStack().setSaveCheckpoint();
     updateTitle();
 }
 
 void MainWindow::openFileDialog() {
-    if (!maybeSave()) {
-        return;
-    }
     QString path = QFileDialog::getOpenFileName(this, QStringLiteral("打开 Markdown 文档"), QString(), QStringLiteral("Markdown Files (*.md *.markdown *.txt);;All Files (*.*)"));
     if (!path.isEmpty()) {
         openFile(path);
@@ -302,11 +298,10 @@ bool MainWindow::openFile(const QString &filePath) {
         if (btn == QMessageBox::Yes) {
             QString err;
             if (File::FileService::loadFile(recPath, m_editorView->buffer(), err)) {
-                m_currentFilePath = filePath;
-                m_lastKnownHash = File::FileService::calculateFileHash(filePath);
+                QString loadErr;
+                m_session.load(filePath, m_editorView->buffer(), loadErr);
                 m_editorView->undoStack().clear();
                 // Treat recovered as dirty so user can re-save
-                m_editorView->undoStack().setSaveCheckpoint(999999);
                 updateTitle();
                 return true;
             }
@@ -314,25 +309,23 @@ bool MainWindow::openFile(const QString &filePath) {
     }
 
     QString err;
-    if (!File::FileService::loadFile(filePath, m_editorView->buffer(), err)) {
+    if (!m_session.load(filePath, m_editorView->buffer(), err)) {
         QMessageBox::critical(this, QStringLiteral("打开文件失败"), QStringLiteral("无法加载文件: ") + err);
         return false;
     }
 
-    m_currentFilePath = filePath;
-    m_lastKnownHash = File::FileService::calculateFileHash(filePath);
     m_editorView->undoStack().clear();
-    m_editorView->undoStack().setSaveCheckpoint(m_editorView->buffer().revision());
+    m_editorView->undoStack().setSaveCheckpoint();
     updateTitle();
     return true;
 }
 
 bool MainWindow::saveFile() {
-    if (m_currentFilePath.isEmpty()) {
+    if (m_session.isUntitled()) {
         return saveFileAs();
     }
 
-    auto res = File::FileService::safeSaveFile(m_currentFilePath, m_editorView->buffer(), m_lastKnownHash);
+    auto res = m_session.save(m_editorView->buffer());
     if (!res.success) {
         if (res.hadConflict) {
             auto btn = QMessageBox::warning(this,
@@ -340,9 +333,16 @@ bool MainWindow::saveFile() {
                                             QStringLiteral("该文件已在外部被其他程序修改！\n是否强制覆盖外部修改？"),
                                             QMessageBox::Yes | QMessageBox::No);
             if (btn == QMessageBox::Yes) {
-                // Clear hash to force overwrite
-                m_lastKnownHash.clear();
-                return saveFile();
+                // Force overwrite
+                auto forceRes = m_session.save(m_editorView->buffer(), true);
+                if (forceRes.success) {
+                    m_editorView->undoStack().setSaveCheckpoint();
+                    updateTitle();
+                    return true;
+                } else {
+                    QMessageBox::critical(this, QStringLiteral("保存失败"), forceRes.errorMessage);
+                    return false;
+                }
             }
             return false;
         } else {
@@ -351,26 +351,32 @@ bool MainWindow::saveFile() {
         }
     }
 
-    m_lastKnownHash = File::FileService::calculateFileHash(m_currentFilePath);
-    m_editorView->undoStack().setSaveCheckpoint(m_editorView->buffer().revision());
-    File::FileService::removeRecoverySnapshot(m_currentFilePath);
+    m_editorView->undoStack().setSaveCheckpoint();
     updateTitle();
     return true;
 }
 
 bool MainWindow::saveFileAs() {
-    QString path = QFileDialog::getSaveFileName(this, QStringLiteral("另存为"), m_currentFilePath.isEmpty() ? QStringLiteral("未命名.md") : m_currentFilePath, QStringLiteral("Markdown Files (*.md);;All Files (*.*)"));
+    QString defaultPath = m_session.isUntitled() ? QStringLiteral("未命名.md") : m_session.filePath();
+    QString path = QFileDialog::getSaveFileName(this, QStringLiteral("另存为"), defaultPath, QStringLiteral("Markdown Files (*.md);;All Files (*.*)"));
     if (path.isEmpty()) {
         return false;
     }
 
-    m_currentFilePath = path;
-    m_lastKnownHash.clear(); // new file, no prior hash conflict
-    return saveFile();
+    // Transactional save as
+    auto res = m_session.saveAs(path, m_editorView->buffer());
+    if (!res.success) {
+        QMessageBox::critical(this, QStringLiteral("另存为失败"), res.errorMessage);
+        return false;
+    }
+
+    m_editorView->undoStack().setSaveCheckpoint();
+    updateTitle();
+    return true;
 }
 
 bool MainWindow::maybeSave() {
-    if (!m_editorView->undoStack().isDirty(m_editorView->buffer().revision())) {
+    if (!m_editorView->undoStack().isDirty()) {
         return true;
     }
 
@@ -388,8 +394,8 @@ bool MainWindow::maybeSave() {
 
 void MainWindow::closeEvent(QCloseEvent *event) {
     if (maybeSave()) {
-        if (!m_currentFilePath.isEmpty()) {
-            File::FileService::removeRecoverySnapshot(m_currentFilePath);
+        if (!m_session.isUntitled()) {
+            File::FileService::removeRecoverySnapshot(m_session.filePath());
         }
         event->accept();
     } else {

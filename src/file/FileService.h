@@ -25,7 +25,7 @@ public:
 
     // Crash recovery support
     static QString recoveryDirectory();
-    static void writeRecoverySnapshot(const QString &originalFilePath, const Core::TextBuffer &buffer);
+    static bool writeRecoverySnapshot(const QString &originalFilePath, const Core::TextBuffer &buffer);
     static void removeRecoverySnapshot(const QString &originalFilePath);
     static QString findRecoverySnapshot(const QString &originalFilePath);
 };

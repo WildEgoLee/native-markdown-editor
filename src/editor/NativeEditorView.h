@@ -1,0 +1,113 @@
+#pragma once
+
+#include "core/TextBuffer.h"
+#include "core/UndoStack.h"
+#include "parser/MarkdownParserAdapter.h"
+#include "mapping/DisplayProjection.h"
+#include "LayoutEngine.h"
+
+#include <QAbstractScrollArea>
+#include <QTimer>
+#include <QInputMethodEvent>
+
+namespace MarkdownTool::UI {
+class SlashCommandPopup;
+}
+
+namespace MarkdownTool::Editor {
+
+class NativeEditorView : public QAbstractScrollArea {
+    Q_OBJECT
+
+public:
+    explicit NativeEditorView(QWidget *parent = nullptr);
+    ~NativeEditorView() override;
+
+    Core::TextBuffer &buffer() { return m_buffer; }
+    const Core::TextBuffer &buffer() const { return m_buffer; }
+
+    Core::UndoStack &undoStack() { return m_undoStack; }
+    const Core::UndoStack &undoStack() const { return m_undoStack; }
+
+    int cursorPos() const { return m_cursorPos; }
+    int selectionAnchor() const { return m_selectionAnchor; }
+    bool hasSelection() const { return m_cursorPos != m_selectionAnchor; }
+
+    bool isSourceMode() const { return m_isSourceMode; }
+    void setSourceMode(bool enabled);
+
+    void setCursorPos(int pos, bool keepAnchor = false);
+    void selectAll();
+
+    // Formatting commands
+    void toggleBold();
+    void toggleItalic();
+    void toggleStrikethrough();
+    void toggleCodeSpan();
+    void insertLink();
+    void toggleTaskList();
+    void insertHeading(int level);
+
+    void copy();
+    void cut();
+    void paste();
+    void undo();
+    void redo();
+
+    bool findText(const QString &text, bool matchCase, bool forward);
+    bool replaceOne(const QString &findStr, const QString &replaceStr, bool matchCase);
+    int replaceAll(const QString &findStr, const QString &replaceStr, bool matchCase);
+
+    void reparseAndRelayout();
+
+signals:
+    void cursorMoved(int line, int col, int offset);
+    void textChanged();
+    void modeChanged(bool isSourceMode);
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
+    void mouseDoubleClickEvent(QMouseEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
+    void inputMethodEvent(QInputMethodEvent *event) override;
+    QVariant inputMethodQuery(Qt::InputMethodQuery query) const override;
+    void focusInEvent(QFocusEvent *event) override;
+    void focusOutEvent(QFocusEvent *event) override;
+
+private slots:
+    void onBlinkTimer();
+
+private:
+    void executeEdit(int offset, int removeLength, const QString &insertText);
+    void handleEnterKey();
+    void handleBackspaceKey();
+    void handleTabKey(bool shiftPressed);
+    void updateScrollBars();
+    void ensureCursorVisible();
+
+    Core::TextBuffer m_buffer;
+    Core::UndoStack m_undoStack;
+    Parser::MarkdownParserAdapter m_parser;
+    Parser::SemanticNodePtr m_rootNode;
+    Mapping::DisplayProjection m_projection;
+    LayoutEngine m_layoutEngine;
+
+    int m_cursorPos = 0;
+    int m_selectionAnchor = 0;
+
+    bool m_isSourceMode = false;
+    bool m_cursorVisible = true;
+    QTimer *m_blinkTimer = nullptr;
+
+    QString m_preeditString;
+    int m_preeditCursorPos = 0;
+
+    bool m_isMouseSelecting = false;
+    UI::SlashCommandPopup *m_slashPopup = nullptr;
+};
+
+} // namespace MarkdownTool::Editor

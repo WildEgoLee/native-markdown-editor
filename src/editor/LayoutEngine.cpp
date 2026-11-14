@@ -9,107 +9,215 @@ namespace MarkdownTool::Editor {
 LayoutEngine::LayoutEngine() = default;
 LayoutEngine::~LayoutEngine() = default;
 
+void LayoutEngine::layoutSingleBlock(const Mapping::VisualBlock &vBlock,
+                                     int blockIndex,
+                                     qreal contentWidth,
+                                     qreal &currentY,
+                                     int preeditOffset,
+                                     const QString &preeditString)
+{
+    BlockLayoutData bData;
+    bData.visualBlockIndex = blockIndex;
+    bData.layout = std::make_shared<QTextLayout>();
+
+    QString lineText = vBlock.visualText;
+    QList<QTextLayout::FormatRange> formats;
+
+    bool hasImeHere = !preeditString.isEmpty() && preeditOffset >= 0 && vBlock.sourceRange.contains(preeditOffset);
+    int imeInsertPos = hasImeHere ? vBlock.sourceToVisual(preeditOffset) : -1;
+
+    if (hasImeHere && imeInsertPos >= 0 && imeInsertPos <= lineText.length()) {
+        lineText.insert(imeInsertPos, preeditString);
+
+        // Shift subsequent format ranges
+        for (const auto &seg : vBlock.segments) {
+            if (seg.visualLength > 0) {
+                QTextLayout::FormatRange fr;
+                fr.start = (seg.visualStart >= imeInsertPos) ? (seg.visualStart + preeditString.length()) : seg.visualStart;
+                fr.length = seg.visualLength;
+                fr.format = seg.format;
+                formats.append(fr);
+            }
+        }
+
+        // Add IME preedit underline format
+        QTextLayout::FormatRange imeFr;
+        imeFr.start = imeInsertPos;
+        imeFr.length = preeditString.length();
+        imeFr.format.setFontUnderline(true);
+        imeFr.format.setForeground(QColor(50, 130, 240));
+        formats.append(imeFr);
+    } else {
+        // Apply normal format ranges
+        for (const auto &seg : vBlock.segments) {
+            if (seg.visualLength > 0) {
+                QTextLayout::FormatRange fr;
+                fr.start = seg.visualStart;
+                fr.length = seg.visualLength;
+                fr.format = seg.format;
+                formats.append(fr);
+            }
+        }
+    }
+
+    bData.layout->setText(lineText);
+    bData.layout->setFormats(formats);
+
+    QTextOption option;
+    option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    bData.layout->setTextOption(option);
+
+    qreal indent = vBlock.indentLevel * 24.0;
+    if (vBlock.isQuote) {
+        indent += 16.0;
+    }
+    qreal blockContentWidth = qMax(100.0, contentWidth - indent - 40.0); // 40 = margins
+
+    currentY += vBlock.marginTop;
+
+    bData.layout->beginLayout();
+    qreal y = 0;
+    while (true) {
+        QTextLine line = bData.layout->createLine();
+        if (!line.isValid()) {
+            break;
+        }
+        line.setLineWidth(blockContentWidth);
+        line.setPosition(QPointF(indent, y));
+        y += line.height();
+    }
+    bData.layout->endLayout();
+
+    if (y < 24.0) {
+        y = 24.0; // Minimum block height
+    }
+
+    bData.rect = QRectF(20.0, currentY, contentWidth - 40.0, y);
+    currentY += y + vBlock.marginBottom;
+
+    bData.cachedText = vBlock.visualText;
+    bData.cachedSegmentCount = vBlock.segments.size();
+    bData.cachedIndentLevel = vBlock.indentLevel;
+    bData.cachedIsQuote = vBlock.isQuote;
+    bData.cachedBlockType = vBlock.blockType;
+    bData.hasIme = hasImeHere;
+
+    m_blocks.append(std::move(bData));
+}
+
+void LayoutEngine::reuseBlock(const BlockLayoutData &src,
+                              const Mapping::VisualBlock &vBlock,
+                              int blockIndex,
+                              qreal contentWidth,
+                              qreal &currentY)
+{
+    BlockLayoutData bData;
+    bData.visualBlockIndex = blockIndex;
+    bData.layout = src.layout; // Direct reuse without text shaping or line layout
+    bData.cachedText = src.cachedText;
+    bData.cachedSegmentCount = src.cachedSegmentCount;
+    bData.cachedIndentLevel = src.cachedIndentLevel;
+    bData.cachedIsQuote = src.cachedIsQuote;
+    bData.cachedBlockType = src.cachedBlockType;
+    bData.hasIme = false;
+
+    currentY += vBlock.marginTop;
+    qreal h = src.rect.height();
+    bData.rect = QRectF(20.0, currentY, contentWidth - 40.0, h);
+    currentY += h + vBlock.marginBottom;
+
+    m_blocks.append(std::move(bData));
+}
+
+bool LayoutEngine::isBlockLayoutEqual(const Mapping::VisualBlock &vBlock,
+                                      const BlockLayoutData &prevData,
+                                      bool hasImeHere)
+{
+    if (prevData.hasIme || hasImeHere) {
+        return false;
+    }
+    if (!prevData.layout) {
+        return false;
+    }
+    return prevData.cachedText == vBlock.visualText &&
+           prevData.cachedSegmentCount == vBlock.segments.size() &&
+           prevData.cachedIndentLevel == vBlock.indentLevel &&
+           prevData.cachedIsQuote == vBlock.isQuote &&
+           prevData.cachedBlockType == vBlock.blockType;
+}
+
 void LayoutEngine::layout(const Mapping::DisplayProjection &projection,
                           qreal contentWidth,
                           int preeditOffset,
                           const QString &preeditString)
 {
-    m_blocks.clear();
-    m_totalHeight = 0;
-    m_lastWidth = contentWidth;
-
     const auto &vBlocks = projection.blocks();
     if (vBlocks.isEmpty()) {
+        m_blocks.clear();
+        m_totalHeight = 0;
+        m_lastWidth = contentWidth;
         return;
     }
 
-    qreal currentY = 20; // Top padding
+    bool canReuse = (m_lastWidth > 0 && qAbs(contentWidth - m_lastWidth) < 1.0 && !m_blocks.isEmpty());
+    m_lastWidth = contentWidth;
 
-    for (int i = 0; i < vBlocks.size(); ++i) {
-        const auto &vBlock = vBlocks[i];
-        BlockLayoutData bData;
-        bData.visualBlockIndex = i;
-        bData.layout = std::make_shared<QTextLayout>();
+    const int N = vBlocks.size();
+    const int M = m_blocks.size();
 
-        QString lineText = vBlock.visualText;
-        QList<QTextLayout::FormatRange> formats;
+    QVector<BlockLayoutData> oldBlocks = std::move(m_blocks);
+    m_blocks.clear();
+    m_blocks.reserve(N);
 
-        bool hasImeHere = !preeditString.isEmpty() && preeditOffset >= 0 && vBlock.sourceRange.contains(preeditOffset);
-        int imeInsertPos = hasImeHere ? vBlock.sourceToVisual(preeditOffset) : -1;
+    qreal currentY = 20.0; // Top padding
 
-        if (hasImeHere && imeInsertPos >= 0 && imeInsertPos <= lineText.length()) {
-            lineText.insert(imeInsertPos, preeditString);
-
-            // Shift subsequent format ranges
-            for (const auto &seg : vBlock.segments) {
-                if (seg.visualLength > 0) {
-                    QTextLayout::FormatRange fr;
-                    fr.start = (seg.visualStart >= imeInsertPos) ? (seg.visualStart + preeditString.length()) : seg.visualStart;
-                    fr.length = seg.visualLength;
-                    fr.format = seg.format;
-                    formats.append(fr);
-                }
-            }
-
-            // Add IME preedit underline format
-            QTextLayout::FormatRange imeFr;
-            imeFr.start = imeInsertPos;
-            imeFr.length = preeditString.length();
-            imeFr.format.setFontUnderline(true);
-            imeFr.format.setForeground(QColor(50, 130, 240));
-            formats.append(imeFr);
-        } else {
-            // Apply normal format ranges
-            for (const auto &seg : vBlock.segments) {
-                if (seg.visualLength > 0) {
-                    QTextLayout::FormatRange fr;
-                    fr.start = seg.visualStart;
-                    fr.length = seg.visualLength;
-                    fr.format = seg.format;
-                    formats.append(fr);
-                }
-            }
+    if (!canReuse) {
+        for (int i = 0; i < N; ++i) {
+            layoutSingleBlock(vBlocks[i], i, contentWidth, currentY, preeditOffset, preeditString);
         }
-
-        bData.layout->setText(lineText);
-        bData.layout->setFormats(formats);
-
-        QTextOption option;
-        option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
-        bData.layout->setTextOption(option);
-
-        qreal indent = vBlock.indentLevel * 24.0;
-        if (vBlock.isQuote) {
-            indent += 16.0;
-        }
-        qreal blockContentWidth = qMax(100.0, contentWidth - indent - 40.0); // 40 = margins
-
-        currentY += vBlock.marginTop;
-
-        bData.layout->beginLayout();
-        qreal y = 0;
-        while (true) {
-            QTextLine line = bData.layout->createLine();
-            if (!line.isValid()) {
-                break;
-            }
-            line.setLineWidth(blockContentWidth);
-            line.setPosition(QPointF(indent, y));
-            y += line.height();
-        }
-        bData.layout->endLayout();
-
-        if (y < 24.0) {
-            y = 24.0; // Minimum block height
-        }
-
-        bData.rect = QRectF(20.0, currentY, contentWidth - 40.0, y);
-        currentY += y + vBlock.marginBottom;
-
-        m_blocks.append(std::move(bData));
+        m_totalHeight = currentY + 40.0;
+        return;
     }
 
-    m_totalHeight = currentY + 40.0; // Bottom padding
+    // 1. Prefix matching from beginning
+    int prefixLen = 0;
+    while (prefixLen < N && prefixLen < M) {
+        bool hasIme = !preeditString.isEmpty() && preeditOffset >= 0 && vBlocks[prefixLen].sourceRange.contains(preeditOffset);
+        if (!isBlockLayoutEqual(vBlocks[prefixLen], oldBlocks[prefixLen], hasIme)) {
+            break;
+        }
+        ++prefixLen;
+    }
+
+    // 2. Suffix matching from end
+    int suffixLen = 0;
+    while (suffixLen < (N - prefixLen) && suffixLen < (M - prefixLen)) {
+        int vIdx = N - 1 - suffixLen;
+        int oldIdx = M - 1 - suffixLen;
+        bool hasIme = !preeditString.isEmpty() && preeditOffset >= 0 && vBlocks[vIdx].sourceRange.contains(preeditOffset);
+        if (!isBlockLayoutEqual(vBlocks[vIdx], oldBlocks[oldIdx], hasIme)) {
+            break;
+        }
+        ++suffixLen;
+    }
+
+    // 3. Assemble: Prefix (reused layout)
+    for (int i = 0; i < prefixLen; ++i) {
+        reuseBlock(oldBlocks[i], vBlocks[i], i, contentWidth, currentY);
+    }
+
+    // 4. Assemble: Modified / New blocks
+    for (int i = prefixLen; i < N - suffixLen; ++i) {
+        layoutSingleBlock(vBlocks[i], i, contentWidth, currentY, preeditOffset, preeditString);
+    }
+
+    // 5. Assemble: Suffix (reused layout)
+    for (int i = N - suffixLen; i < N; ++i) {
+        int oldIdx = M - (N - i);
+        reuseBlock(oldBlocks[oldIdx], vBlocks[i], i, contentWidth, currentY);
+    }
+
+    m_totalHeight = currentY + 40.0;
 }
 
 int LayoutEngine::hitTest(const QPointF &point, const Mapping::DisplayProjection &projection) const {
@@ -119,21 +227,17 @@ int LayoutEngine::hitTest(const QPointF &point, const Mapping::DisplayProjection
 
     const auto &vBlocks = projection.blocks();
 
-    int targetIndex = -1;
-    for (int i = 0; i < m_blocks.size(); ++i) {
-        const auto &b = m_blocks[i];
-        if (point.y() >= b.rect.top() && point.y() <= b.rect.bottom()) {
-            targetIndex = i;
-            break;
-        }
-    }
+    // Binary search for block intersecting point.y()
+    auto it = std::lower_bound(m_blocks.begin(), m_blocks.end(), point.y(),
+        [](const BlockLayoutData &b, qreal y) {
+            return b.rect.bottom() < y;
+        });
 
-    if (targetIndex == -1) {
-        if (point.y() < m_blocks.first().rect.top()) {
-            targetIndex = 0;
-        } else {
-            targetIndex = m_blocks.size() - 1;
-        }
+    int targetIndex = 0;
+    if (it == m_blocks.end()) {
+        targetIndex = m_blocks.size() - 1;
+    } else {
+        targetIndex = static_cast<int>(std::distance(m_blocks.begin(), it));
     }
 
     const auto &bData = m_blocks[targetIndex];
@@ -205,14 +309,24 @@ void LayoutEngine::paint(QPainter *painter,
                          int selectionEnd,
                          const QString &preeditString)
 {
-    const auto &vBlocks = projection.blocks();
+    if (m_blocks.isEmpty()) {
+        return;
+    }
 
+    const auto &vBlocks = projection.blocks();
     painter->setRenderHint(QPainter::Antialiasing, true);
 
-    for (int i = 0; i < m_blocks.size(); ++i) {
+    // Binary search for first block that could intersect visibleRect
+    auto it = std::lower_bound(m_blocks.begin(), m_blocks.end(), visibleRect.top(),
+        [](const BlockLayoutData &b, qreal y) {
+            return b.rect.bottom() < y;
+        });
+    int startIdx = (it != m_blocks.end()) ? static_cast<int>(std::distance(m_blocks.begin(), it)) : 0;
+
+    for (int i = startIdx; i < m_blocks.size(); ++i) {
         const auto &bData = m_blocks[i];
-        if (!bData.rect.intersects(visibleRect)) {
-            continue; // Viewport clipping
+        if (bData.rect.top() > visibleRect.bottom()) {
+            break; // Past the visible viewport, stop rendering!
         }
 
         const auto &vBlock = vBlocks[bData.visualBlockIndex];

@@ -599,14 +599,29 @@ void TestProbes::testPerformanceBaselineAndLatency() {
     QVERIFY(initialChanged);
     QVERIFY(projection.blockCount() > 500);
 
-    // 3. Measure LayoutEngine layout time
+    // 3. Measure LayoutEngine initial full layout time
     timer.restart();
     Editor::LayoutEngine engine;
     engine.layout(projection, 800.0);
     qint64 layoutTimeMs = timer.elapsed();
     QVERIFY(engine.totalHeight() > 0);
 
-    // 4. Measure Cursor Navigation with change detection:
+    // 4. Measure Incremental LayoutEngine layout time on single block edit (Typing keystroke)
+    // Modify one character in buffer (e.g. at offset 500)
+    Core::TextBuffer editedBuffer;
+    editedBuffer.setText(doc100k);
+    editedBuffer.replace(500, 1, QStringLiteral("X"));
+    auto editedRoot = parser.parse(editedBuffer);
+    Mapping::DisplayProjection editedProjection;
+    editedProjection.buildProjection(editedRoot, editedBuffer, 501, false);
+
+    timer.restart();
+    engine.layout(editedProjection, 800.0);
+    qint64 incrementalLayoutTimeNs = timer.nsecsElapsed();
+    qreal incrementalLayoutTimeMs = incrementalLayoutTimeNs / 1000000.0;
+    QVERIFY(engine.totalHeight() > 0);
+
+    // 5. Measure Cursor Navigation with change detection:
     // First, cursor at body offset 100
     projection.buildProjection(rootNode, buffer, 100, false);
     // Moving cursor from 100 to 105 within normal text -> projection unchanged!
@@ -620,7 +635,7 @@ void TestProbes::testPerformanceBaselineAndLatency() {
     bool changedHeading = projection.buildProjection(rootNode, buffer, 0, false);
     QVERIFY(changedHeading);
 
-    // 5. Measure hit test performance
+    // 6. Measure hit test performance (binary search)
     timer.restart();
     int hitOff = engine.hitTest(QPointF(200, 1500), projection);
     qint64 hitTestTimeUs = timer.nsecsElapsed() / 1000;
@@ -630,13 +645,18 @@ void TestProbes::testPerformanceBaselineAndLatency() {
     qDebug() << "Document Size:" << byteSize / 1024 << "KB, Block Count:" << projection.blockCount();
     qDebug() << "AST Parse Time:" << parseTimeMs << "ms";
     qDebug() << "Display Projection Time:" << projTimeMs << "ms";
-    qDebug() << "LayoutEngine Layout Time:" << layoutTimeMs << "ms";
+    qDebug() << "Full LayoutEngine Layout Time:" << layoutTimeMs << "ms";
+    qDebug() << "Incremental Keystroke Layout Time:" << incrementalLayoutTimeMs << "ms (Speedup:" << (layoutTimeMs > 0 ? (layoutTimeMs / qMax(0.1, incrementalLayoutTimeMs)) : 1.0) << "x)";
     qDebug() << "Cursor Navigation Check Time:" << cursorNavTimeNs / 1000.0 << "us (Changed:" << changedNormal << ")";
-    qDebug() << "HitTest Time:" << hitTestTimeUs << "us";
+    qDebug() << "HitTest Time (Binary Search):" << hitTestTimeUs << "us";
 
-    // Performance assertions: 100KB document (2400 blocks) must parse within 150ms and cursor navigation check within 10ms (well under 60fps budget of 16.6ms)
+    // Performance assertions:
+    // 1. Initial parse < 150ms
     QVERIFY(parseTimeMs < 150);
-    QVERIFY(cursorNavTimeNs < 10 * 1000 * 1000); // < 10ms
+    // 2. Incremental keystroke layout must be < 5ms (vastly superior to 50ms+ full layout)
+    QVERIFY(incrementalLayoutTimeMs < 5.0);
+    // 3. Cursor navigation check within 10ms (well under 60fps budget of 16.6ms)
+    QVERIFY(cursorNavTimeNs < 10 * 1000 * 1000);
 }
 
 // Probe 17: Crash recovery load preserves recovered draft, sets dirty state, retains snapshot until saved

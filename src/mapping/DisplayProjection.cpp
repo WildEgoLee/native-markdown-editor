@@ -130,14 +130,20 @@ int DisplayProjection::findBlockIndexBySourceOffset(int sourceOffset) const {
         return -1;
     }
 
-    for (int i = 0; i < m_blocks.size(); ++i) {
-        if (m_blocks[i].sourceRange.contains(sourceOffset)) {
-            return i;
-        }
+    if (sourceOffset <= m_blocks.first().sourceRange.start) {
+        return 0;
+    }
+    if (sourceOffset >= m_blocks.last().sourceRange.end) {
+        return m_blocks.size() - 1;
     }
 
-    if (sourceOffset < m_blocks.first().sourceRange.start) {
-        return 0;
+    // Binary search for block containing sourceOffset
+    auto it = std::lower_bound(m_blocks.begin(), m_blocks.end(), sourceOffset,
+        [](const VisualBlock &b, int offset) {
+            return b.sourceRange.end <= offset;
+        });
+    if (it != m_blocks.end()) {
+        return static_cast<int>(std::distance(m_blocks.begin(), it));
     }
     return m_blocks.size() - 1;
 }

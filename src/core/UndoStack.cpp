@@ -7,16 +7,21 @@ UndoStack::UndoStack(QObject *parent)
 {
 }
 
-void UndoStack::clear() {
+void UndoStack::clear(bool startAsDirty) {
     m_commands.clear();
     m_index = 0;
-    m_cleanIndex = 0;
+    m_cleanIndex = startAsDirty ? -1 : 0;
     m_mergeGroupActive = true;
-    m_wasClean = true;
+    m_wasClean = !startAsDirty;
 
     emit canUndoChanged(false);
     emit canRedoChanged(false);
-    emit cleanStateChanged(true);
+    emit cleanStateChanged(!startAsDirty);
+}
+
+void UndoStack::markDirty() {
+    m_cleanIndex = -1;
+    checkCleanState();
 }
 
 void UndoStack::push(const EditTransaction &transaction, TextBuffer &buffer) {

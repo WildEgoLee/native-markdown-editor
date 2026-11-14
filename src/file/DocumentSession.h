@@ -42,6 +42,13 @@ public:
         return true;
     }
 
+    // Attach file path and disk baseline hash without reading content from disk
+    // (Used when buffer has already been restored from a recovery snapshot or external source)
+    void attachFile(const QString &targetPath, const QByteArray &diskHash = QByteArray()) {
+        m_filePath = targetPath;
+        m_lastKnownHash = diskHash.isEmpty() ? FileService::calculateFileHash(targetPath) : diskHash;
+    }
+
     SaveResult save(const Core::TextBuffer &buffer, bool forceOverwrite = false) {
         if (m_filePath.isEmpty()) {
             SaveResult r;

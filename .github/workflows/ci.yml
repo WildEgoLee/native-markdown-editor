@@ -42,18 +42,48 @@ jobs:
       run: |
         ctest --test-dir build --output-on-failure -C Release
 
-    - name: Deploy Qt Runtime & Package Artifact
+    - name: Deploy Qt Runtime & Package True ZIP Artifact
+      shell: pwsh
       run: |
         windeployqt --release --no-translations --compiler-runtime build/MarkdownNativeEditor.exe
-        mkdir dist
-        copy build\MarkdownNativeEditor.exe dist\
-        copy build\*.dll dist\
-        xcopy /E /I /Y build\platforms dist\platforms\
-        xcopy /E /I /Y build\styles dist\styles\
-        copy LICENSE dist\
-        copy README.md dist\
-        copy welcome.md dist\
-        tar -czvf MarkdownNativeEditor-windows-x64.zip -C dist .
+        New-Item -ItemType Directory -Force -Path dist | Out-Null
+        Copy-Item build\MarkdownNativeEditor.exe dist\
+        Copy-Item build\*.dll dist\ -ErrorAction SilentlyContinue
+        Copy-Item -Recurse -Force build\platforms dist\platforms
+        Copy-Item -Recurse -Force build\styles dist\styles -ErrorAction SilentlyContinue
+        Copy-Item LICENSE, README.md, welcome.md dist\
+        Compress-Archive -Path dist\* -DestinationPath MarkdownNativeEditor-windows-x64.zip -Force
+
+    - name: Verify ZIP Integrity & Run Smoke Test
+      shell: pwsh
+      run: |
+        # 1. Verify standard Windows extraction
+        Expand-Archive -Path MarkdownNativeEditor-windows-x64.zip -DestinationPath dist_extracted -Force
+
+        # 2. Verify file manifest
+        $manifest = @(
+            "dist_extracted\MarkdownNativeEditor.exe",
+            "dist_extracted\Qt6Core.dll",
+            "dist_extracted\Qt6Gui.dll",
+            "dist_extracted\Qt6Widgets.dll",
+            "dist_extracted\platforms\qwindows.dll",
+            "dist_extracted\LICENSE"
+        )
+        foreach ($file in $manifest) {
+            if (-not (Test-Path $file)) {
+                Write-Error "Missing critical package file: $file"
+                exit 1
+            }
+        }
+        Write-Host "File manifest check passed."
+
+        # 3. Smoke test executable initialization and dependency resolution
+        $p = Start-Process -FilePath "dist_extracted\MarkdownNativeEditor.exe" -ArgumentList "--smoke-test" -NoNewWindow -Wait -PassThru
+        if ($p.ExitCode -ne 0) {
+            Write-Error "Smoke test failed with exit code $($p.ExitCode)"
+            exit 1
+        }
+        Write-Host "Smoke test passed: MarkdownNativeEditor.exe launched and resolved all dependencies cleanly."
 
     - name: Upload Build Artifact
       uses: actions/upload-artifact@v4

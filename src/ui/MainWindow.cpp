@@ -305,13 +305,18 @@ bool MainWindow::openFile(const QString &filePath) {
         if (btn == QMessageBox::Yes) {
             QString err;
             if (File::FileService::loadFile(recPath, m_editorView->buffer(), err)) {
-                QString loadErr;
-                m_session.load(filePath, m_editorView->buffer(), loadErr);
-                m_editorView->undoStack().clear();
-                // Treat recovered as dirty so user can re-save
+                // Initialize session to target file and baseline hash, without overwriting recovered buffer
+                m_session.attachFile(filePath);
+                // Mark document as dirty so user is prompted to save, retaining snapshot until successful save
+                m_editorView->undoStack().clear(true);
                 updateTitle();
                 return true;
+            } else {
+                QMessageBox::warning(this, QStringLiteral("恢复失败"), QStringLiteral("无法加载恢复快照，将尝试加载磁盘原始内容: ") + err);
             }
+        } else {
+            // User explicitly chose to discard recovery snapshot
+            File::FileService::removeRecoverySnapshot(filePath);
         }
     }
 

@@ -21,7 +21,8 @@ public:
     bool canUndo() const { return m_index > 0; }
     bool canRedo() const { return m_index < m_commands.size(); }
 
-    void clear();
+    void clear(bool startAsDirty = false);
+    void markDirty();
 
     void setSaveCheckpoint();
     void breakMergeGroup();

@@ -36,6 +36,8 @@ private slots:
     void testIMEPreeditLayoutAndCoordinates();
     void testDocumentSessionTransactionalSaveAs();
     void testPerformanceBaselineAndLatency();
+    void testRecoveryLoadRetainsSnapshotAndDirtyState();
+    void testRecoveryDiscardRemovesSnapshot();
 };
 
 // Probe 1: UTF-8 BOM, CRLF, trailing spaces, no-newline exact byte-for-byte invariance
@@ -635,6 +637,101 @@ void TestProbes::testPerformanceBaselineAndLatency() {
     // Performance assertions: 100KB document (2400 blocks) must parse within 150ms and cursor navigation check within 10ms (well under 60fps budget of 16.6ms)
     QVERIFY(parseTimeMs < 150);
     QVERIFY(cursorNavTimeNs < 10 * 1000 * 1000); // < 10ms
+}
+
+// Probe 17: Crash recovery load preserves recovered draft, sets dirty state, retains snapshot until saved
+void TestProbes::testRecoveryLoadRetainsSnapshotAndDirtyState() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    QString filePath = tempDir.filePath(QStringLiteral("important_report.md"));
+
+    // 1. Initial disk content
+    Core::TextBuffer diskBuffer;
+    diskBuffer.setText(QStringLiteral("# 磁盘原始基线内容\n这是保存过的旧版本。"));
+    auto saveRes = File::FileService::safeSaveFile(filePath, diskBuffer, QByteArray());
+    QVERIFY(saveRes.success);
+
+    // 2. Simulate unsaved edits before crash and write recovery snapshot
+    Core::TextBuffer draftBuffer;
+    draftBuffer.setText(QStringLiteral("# 崩溃前未保存的珍贵草稿\n这是用户写了半小时的新内容！"));
+    File::FileService::writeRecoverySnapshot(filePath, draftBuffer);
+
+    QString snapshotFile = File::FileService::findRecoverySnapshot(filePath);
+    QVERIFY(!snapshotFile.isEmpty());
+    QVERIFY(QFile::exists(snapshotFile));
+
+    // 3. User re-opens document and confirms "Load from recovery"
+    Core::TextBuffer editorBuffer;
+    Core::UndoStack undoStack;
+    File::DocumentSession session;
+
+    QString loadErr;
+    QVERIFY(File::FileService::loadFile(snapshotFile, editorBuffer, loadErr));
+    // Verify buffer actually contains recovered draft, NOT overwritten by disk
+    QCOMPARE(editorBuffer.text(), draftBuffer.text());
+
+    // Attach file identity and disk baseline hash
+    session.attachFile(filePath);
+    undoStack.clear(true); // start as dirty
+
+    // 4. Assertions on recovery state:
+    // - Editor buffer retains recovered draft
+    QCOMPARE(editorBuffer.text(), draftBuffer.text());
+    // - Document is Dirty! (User must be aware this is uncommitted recovery)
+    QVERIFY(undoStack.isDirty());
+    // - Snapshot file STILL exists on disk to protect against consecutive crash before save
+    QVERIFY(QFile::exists(snapshotFile));
+
+    // 5. User executes Save
+    auto saveRecoveredRes = session.save(editorBuffer);
+    QVERIFY(saveRecoveredRes.success);
+    undoStack.setSaveCheckpoint();
+    QVERIFY(!undoStack.isDirty());
+
+    // 6. Verify:
+    // - Original disk file now has the recovered content
+    Core::TextBuffer verifyBuffer;
+    QVERIFY(File::FileService::loadFile(filePath, verifyBuffer, loadErr));
+    QCOMPARE(verifyBuffer.text(), draftBuffer.text());
+    // - Recovery snapshot was safely cleaned up upon successful save
+    QVERIFY(File::FileService::findRecoverySnapshot(filePath).isEmpty());
+}
+
+// Probe 18: Crash recovery discard cleanly removes snapshot and opens disk original
+void TestProbes::testRecoveryDiscardRemovesSnapshot() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    QString filePath = tempDir.filePath(QStringLiteral("discard_test.md"));
+
+    // 1. Initial disk content
+    Core::TextBuffer diskBuffer;
+    diskBuffer.setText(QStringLiteral("# 磁盘原始内容"));
+    QVERIFY(File::FileService::safeSaveFile(filePath, diskBuffer, QByteArray()).success);
+
+    // 2. Recovery snapshot
+    Core::TextBuffer draftBuffer;
+    draftBuffer.setText(QStringLiteral("# 错误的草稿（用户想丢弃）"));
+    File::FileService::writeRecoverySnapshot(filePath, draftBuffer);
+    QVERIFY(!File::FileService::findRecoverySnapshot(filePath).isEmpty());
+
+    // 3. User clicks NO (Discard recovery)
+    File::FileService::removeRecoverySnapshot(filePath);
+    QVERIFY(File::FileService::findRecoverySnapshot(filePath).isEmpty());
+
+    // 4. Load from original disk file
+    Core::TextBuffer editorBuffer;
+    File::DocumentSession session;
+    Core::UndoStack undoStack;
+    QString loadErr;
+    QVERIFY(session.load(filePath, editorBuffer, loadErr));
+    undoStack.clear(false);
+    undoStack.setSaveCheckpoint();
+
+    // Verify buffer has disk content and state is clean
+    QCOMPARE(editorBuffer.text(), diskBuffer.text());
+    QVERIFY(!undoStack.isDirty());
 }
 
 QTEST_MAIN(TestProbes)

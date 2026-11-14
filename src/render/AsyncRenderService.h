@@ -62,6 +62,9 @@ signals:
     void renderReady(MarkdownTool::Render::RenderKind kind, const QString &source);
 
 private:
+    void commitToCacheLocked(const CacheKey &key, const std::shared_ptr<QSvgRenderer> &renderer, qint64 byteSize, quint64 generation);
+    void evictIfNeededLocked();
+
     mutable QMutex m_mutex;
     QHash<CacheKey, std::shared_ptr<QSvgRenderer>> m_rendererCache;
     QHash<CacheKey, qint64> m_rendererByteSizes;

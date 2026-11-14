@@ -69,6 +69,7 @@ jobs:
             "dist_extracted\Qt6Core.dll",
             "dist_extracted\Qt6Gui.dll",
             "dist_extracted\Qt6Widgets.dll",
+            "dist_extracted\Qt6Svg.dll",
             "dist_extracted\platforms\qwindows.dll",
             "dist_extracted\LICENSE"
         )

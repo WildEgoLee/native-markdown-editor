@@ -5,6 +5,7 @@
 #include <QElapsedTimer>
 #include <QImage>
 #include <QClipboard>
+#include <QScrollBar>
 #include <cmath>
 #include <random>
 #include <thread>
@@ -74,6 +75,8 @@ private slots:
     void testNestedFractionGeometryAndHierarchy();
     void testFirstRunAsyncRenderReliabilityAndByteBudget();
     void testFirstRunDocumentGuiIntegration();
+    void testSyncFallbackEpochRaceConditionAndUnifiedCache();
+    void testRealGuiAsyncAutoRefreshAndInteractiveRegression();
 };
 
 // Probe 1: UTF-8 BOM, CRLF, trailing spaces, no-newline exact byte-for-byte invariance
@@ -2758,6 +2761,232 @@ void TestProbes::testFirstRunDocumentGuiIntegration() {
         }
     }
     QCOMPARE(borderClippedPixels, 0);
+}
+
+// Probe 44: P1 Synchronous fallback cross-generation writeback race condition & unified cache safety
+void TestProbes::testSyncFallbackEpochRaceConditionAndUnifiedCache() {
+    // 1. Isolated service instance
+    auto service = std::make_unique<Render::AsyncRenderService>();
+    QVERIFY(service != nullptr);
+    quint64 gen1 = service->currentGeneration();
+    QCOMPARE(gen1, 1ULL);
+
+    QString formulaA = QStringLiteral("$$A = \\pi r^2$$");
+    QString formulaB = QStringLiteral("$$B = \\int_0^1 x dx$$");
+    Render::CacheKey keyA{Render::RenderKind::Math, formulaA};
+    Render::CacheKey keyB{Render::RenderKind::Math, formulaB};
+
+    // Queue render request in gen 1
+    service->requestRender(formulaA, Render::RenderKind::Math);
+    QVERIFY(service->isPending(formulaA, Render::RenderKind::Math));
+
+    // Clear cache bumps generation to gen 2
+    service->clearCache();
+    quint64 gen2 = service->currentGeneration();
+    QVERIFY(gen2 > gen1);
+    QVERIFY(!service->isPending(formulaA, Render::RenderKind::Math));
+    QCOMPARE(service->cacheCount(), 0);
+    QCOMPARE(service->totalCachedBytes(), 0);
+
+    // Gen 2 submits formulaA
+    service->requestRender(formulaA, Render::RenderKind::Math);
+    QVERIFY(service->isPending(formulaA, Render::RenderKind::Math));
+
+    // Simulate stale Gen 1 task attempting commit via onRenderCompleted
+    QByteArray staleSvg = "<svg id='stale'></svg>";
+    service->onRenderCompleted(keyA, staleSvg, gen1);
+    QCoreApplication::processEvents();
+
+    // Gen 2 pending request must not be removed by stale Gen 1 task
+    QVERIFY(service->isPending(formulaA, Render::RenderKind::Math));
+    // Stale Gen 1 SVG must not be present in Gen 2 cache
+    QVERIFY(!service->isCached(formulaA, Render::RenderKind::Math));
+    QCOMPARE(service->totalCachedBytes(), 0);
+
+    // 2. Synchronous fallback under matching generation
+    auto rB = service->getRenderer(formulaB, Render::RenderKind::Math, true);
+    QVERIFY(rB != nullptr);
+    QVERIFY(service->isCached(formulaB, Render::RenderKind::Math));
+    QVERIFY(!service->isPending(formulaB, Render::RenderKind::Math));
+    QVERIFY(service->totalCachedBytes() > 0);
+
+    // 3. Multithreaded cross-generation concurrency race test
+    std::atomic<bool> stopFlag{false};
+    std::atomic<int> errors{0};
+    std::vector<std::thread> workers;
+
+    for (int t = 0; t < 4; ++t) {
+        workers.emplace_back([&service, &stopFlag, &errors, t]() {
+            int i = 0;
+            while (!stopFlag.load()) {
+                QString src = QStringLiteral("$$\\alpha_%1 = \\sqrt{%1}$$").arg(i % 8);
+                if (t == 0) {
+                    auto r = service->getRenderer(src, Render::RenderKind::Math, true);
+                    if (!r || !r->isValid()) errors++;
+                } else if (t == 1) {
+                    service->requestRender(src, Render::RenderKind::Math);
+                } else if (t == 2) {
+                    if ((i % 16) == 0) {
+                        service->clearCache();
+                    }
+                } else {
+                    qint64 bytes = service->totalCachedBytes();
+                    int count = service->cacheCount();
+                    if (bytes < 0 || count < 0) errors++;
+                }
+                i++;
+                std::this_thread::yield();
+            }
+        });
+    }
+
+    QTest::qWait(180);
+    stopFlag.store(true);
+    for (auto &w : workers) {
+        if (w.joinable()) w.join();
+    }
+    QCoreApplication::processEvents();
+
+    QCOMPARE(errors.load(), 0);
+    service->clearCache();
+    QCOMPARE(service->cacheCount(), 0);
+    QCOMPARE(service->totalCachedBytes(), 0);
+}
+
+// Probe 45: P1 Real-world GUI async auto-refresh pipeline without manual render(), interactive editing, and mode switching
+void TestProbes::testRealGuiAsyncAutoRefreshAndInteractiveRegression() {
+    // 1. Setup Document with Math and Mermaid
+    QString doc = QStringLiteral(
+        "# Beta RC GUI Pipeline\n\n"
+        "Calculus fundamental theorem:\n\n"
+        "$$\\int_a^b f'(x) dx = f(b) - f(a)$$\n\n"
+        "Architecture pipeline diagram:\n\n"
+        "```mermaid\n"
+        "graph LR\n"
+        "Client[Keystroke] --> Adapter[AST Parser] --> Proj[Display Projection] --> View[Native Viewport]\n"
+        "```\n\n"
+        "Closing remarks paragraph.\n"
+    );
+
+    auto service = Render::AsyncRenderService::instance();
+    QVERIFY(service != nullptr);
+    service->clearCache();
+
+    class PaintCounterFilter : public QObject {
+    public:
+        int count = 0;
+    protected:
+        bool eventFilter(QObject *obj, QEvent *event) override {
+            if (event->type() == QEvent::Paint) {
+                count++;
+            }
+            return QObject::eventFilter(obj, event);
+        }
+    };
+
+    Editor::NativeEditorView editorView;
+    editorView.resize(960, 720);
+    PaintCounterFilter counter;
+    editorView.viewport()->installEventFilter(&counter);
+
+    editorView.buffer().setText(doc);
+    editorView.show();
+    QCoreApplication::processEvents();
+
+    // Initial paint occurs (displaying placeholders)
+    int initialPaints = counter.count;
+    QVERIFY(initialPaints >= 1);
+
+    // Listen for renderReady
+    QSignalSpy readySpy(service, &Render::AsyncRenderService::renderReady);
+
+    // Wait for at least 2 renderReady signals from background threads
+    int waitCycles = 0;
+    while (readySpy.count() < 2 && waitCycles < 40) {
+        QTest::qWait(50);
+        QCoreApplication::processEvents();
+        waitCycles++;
+    }
+    QVERIFY(readySpy.count() >= 2);
+
+    // Process event loop so viewport()->update() posts and dispatches the paint event
+    QCoreApplication::processEvents();
+
+    // Verification: Automatic refresh happened purely via Qt event loop without calling editorView.render()
+    QVERIFY2(counter.count > initialPaints,
+             qPrintable(QString("Paint count (%1) must be greater than initial (%2)")
+                 .arg(counter.count).arg(initialPaints)));
+
+    // Verify cache items are populated
+    const auto &proj = editorView.projection();
+    QString mathSrc, mermaidSrc;
+    for (int i = 0; i < proj.blockCount(); ++i) {
+        if (proj.blocks()[i].isMathBlock) mathSrc = proj.blocks()[i].embeddedSource;
+        if (proj.blocks()[i].isMermaidBlock) mermaidSrc = proj.blocks()[i].embeddedSource;
+    }
+    QVERIFY(!mathSrc.isEmpty());
+    QVERIFY(!mermaidSrc.isEmpty());
+    QVERIFY(service->isCached(mathSrc, Render::RenderKind::Math));
+    QVERIFY(service->isCached(mermaidSrc, Render::RenderKind::Mermaid));
+
+    // 2. Interactive in-place editing, Undo, and Redo
+    int formulaPos = doc.indexOf(QStringLiteral("f'(x)"));
+    QVERIFY(formulaPos > 0);
+
+    // Place cursor inside the formula
+    editorView.setCursorPos(formulaPos + 2);
+    QCoreApplication::processEvents();
+
+    // Send keystroke 'z'
+    QKeyEvent keyEvent(QEvent::KeyPress, Qt::Key_Z, Qt::NoModifier, QStringLiteral("z"));
+    QApplication::sendEvent(editorView.viewport(), &keyEvent);
+    QCoreApplication::processEvents();
+
+    QVERIFY(editorView.buffer().text().contains(QStringLiteral("f'z(x)")));
+    QVERIFY(editorView.buffer().text() != doc);
+
+    // Undo
+    editorView.undo();
+    QCoreApplication::processEvents();
+    QCOMPARE(editorView.buffer().text(), doc);
+
+    // Redo
+    editorView.redo();
+    QCoreApplication::processEvents();
+    QVERIFY(editorView.buffer().text().contains(QStringLiteral("f'z(x)")));
+
+    // Revert to original clean document
+    editorView.undo();
+    QCoreApplication::processEvents();
+    QCOMPARE(editorView.buffer().text(), doc);
+
+    // 3. Source Mode vs Live Preview Mode Switch
+    editorView.setSourceMode(true);
+    QCoreApplication::processEvents();
+    QVERIFY(editorView.isSourceMode());
+    for (int i = 0; i < editorView.projection().blockCount(); ++i) {
+        const auto &b = editorView.projection().blocks()[i];
+        if (b.isMathBlock || b.isMermaidBlock) {
+            QVERIFY(b.isInteractiveActive);
+        }
+    }
+
+    // Switch back to Live Preview Mode
+    editorView.setSourceMode(false);
+    editorView.setCursorPos(0);
+    QCoreApplication::processEvents();
+    QVERIFY(!editorView.isSourceMode());
+
+    // 4. Viewport scrolling stability
+    auto vBar = editorView.verticalScrollBar();
+    if (vBar && vBar->maximum() > 0) {
+        vBar->setValue(vBar->maximum());
+        QCoreApplication::processEvents();
+        vBar->setValue(vBar->maximum() / 2);
+        QCoreApplication::processEvents();
+        vBar->setValue(0);
+        QCoreApplication::processEvents();
+    }
 }
 
 QTEST_MAIN(TestProbes)

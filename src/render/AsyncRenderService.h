@@ -50,6 +50,8 @@ public:
     void setMaxCacheEntries(int maxEntries);
 
     qint64 totalCachedBytes() const;
+    qint64 maxCacheBytes() const;
+    void setMaxCacheBytes(qint64 maxBytes);
 
     quint64 currentGeneration() const;
     bool isShuttingDown() const { return m_isShuttingDown.load(); }
@@ -66,9 +68,10 @@ private:
     QList<CacheKey> m_lruList;
     QHash<CacheKey, quint64> m_pendingRequests;
 
-    quint64 m_currentGeneration = 0;
+    quint64 m_currentGeneration = 1;
     int m_maxCacheEntries = 128;
     qint64 m_totalCachedBytes = 0;
+    qint64 m_maxCacheBytes = 32 * 1024 * 1024; // 32 MB default memory budget
     std::atomic<bool> m_isShuttingDown{false};
     std::shared_ptr<std::atomic<bool>> m_aliveToken;
     QThreadPool m_threadPool;

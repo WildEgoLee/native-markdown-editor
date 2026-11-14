@@ -85,10 +85,16 @@ void AsyncRenderService::onRenderCompleted(const CacheKey &key, const QByteArray
             // Stale generation check: if clearCache() bumped the generation,
             // discard the result. DO NOT remove key from m_pendingRequests if a newer generation owns it!
             if (generation != m_currentGeneration) {
-                if (m_pendingRequests.value(key, 0) == generation) {
-                    m_pendingRequests.remove(key);
+                auto it = m_pendingRequests.find(key);
+                if (it != m_pendingRequests.end() && it.value() == generation) {
+                    m_pendingRequests.erase(it);
                 }
                 return;
+            }
+
+            // Deduct old size if key already exists in cache to prevent duplicate counting
+            if (m_rendererByteSizes.contains(key)) {
+                m_totalCachedBytes -= m_rendererByteSizes.value(key);
             }
 
             renderer = std::make_shared<QSvgRenderer>(svgData);
@@ -97,15 +103,16 @@ void AsyncRenderService::onRenderCompleted(const CacheKey &key, const QByteArray
             m_rendererByteSizes[key] = byteSize;
             m_totalCachedBytes += byteSize;
 
-            if (m_pendingRequests.value(key, 0) == generation) {
-                m_pendingRequests.remove(key);
+            auto it = m_pendingRequests.find(key);
+            if (it != m_pendingRequests.end() && it.value() == generation) {
+                m_pendingRequests.erase(it);
             }
 
             // Update LRU
             m_lruList.removeAll(key);
             m_lruList.prepend(key);
 
-            while (m_lruList.size() > m_maxCacheEntries) {
+            while (!m_lruList.isEmpty() && (m_lruList.size() > m_maxCacheEntries || m_totalCachedBytes > m_maxCacheBytes)) {
                 CacheKey oldest = m_lruList.takeLast();
                 m_rendererCache.remove(oldest);
                 m_totalCachedBytes -= m_rendererByteSizes.take(oldest);
@@ -124,7 +131,8 @@ bool AsyncRenderService::isCached(const QString &source, RenderKind kind) const 
 bool AsyncRenderService::isPending(const QString &source, RenderKind kind) const {
     QMutexLocker locker(&m_mutex);
     CacheKey key{kind, source};
-    return m_pendingRequests.value(key, 0) == m_currentGeneration;
+    auto it = m_pendingRequests.constFind(key);
+    return (it != m_pendingRequests.cend() && it.value() == m_currentGeneration);
 }
 
 int AsyncRenderService::cacheCount() const {
@@ -142,6 +150,11 @@ qint64 AsyncRenderService::totalCachedBytes() const {
     return m_totalCachedBytes;
 }
 
+qint64 AsyncRenderService::maxCacheBytes() const {
+    QMutexLocker locker(&m_mutex);
+    return m_maxCacheBytes;
+}
+
 quint64 AsyncRenderService::currentGeneration() const {
     QMutexLocker locker(&m_mutex);
     return m_currentGeneration;
@@ -150,7 +163,17 @@ quint64 AsyncRenderService::currentGeneration() const {
 void AsyncRenderService::setMaxCacheEntries(int maxEntries) {
     QMutexLocker locker(&m_mutex);
     m_maxCacheEntries = std::max(4, maxEntries);
-    while (m_lruList.size() > m_maxCacheEntries) {
+    while (!m_lruList.isEmpty() && (m_lruList.size() > m_maxCacheEntries || m_totalCachedBytes > m_maxCacheBytes)) {
+        CacheKey oldest = m_lruList.takeLast();
+        m_rendererCache.remove(oldest);
+        m_totalCachedBytes -= m_rendererByteSizes.take(oldest);
+    }
+}
+
+void AsyncRenderService::setMaxCacheBytes(qint64 maxBytes) {
+    QMutexLocker locker(&m_mutex);
+    m_maxCacheBytes = std::max<qint64>(1024 * 1024, maxBytes);
+    while (!m_lruList.isEmpty() && (m_lruList.size() > m_maxCacheEntries || m_totalCachedBytes > m_maxCacheBytes)) {
         CacheKey oldest = m_lruList.takeLast();
         m_rendererCache.remove(oldest);
         m_totalCachedBytes -= m_rendererByteSizes.take(oldest);
@@ -179,13 +202,16 @@ std::shared_ptr<QSvgRenderer> AsyncRenderService::getRenderer(const QString &sou
         auto renderer = std::make_shared<QSvgRenderer>(svg);
         {
             QMutexLocker locker(&m_mutex);
+            if (m_rendererByteSizes.contains(key)) {
+                m_totalCachedBytes -= m_rendererByteSizes.value(key);
+            }
             m_rendererCache[key] = renderer;
             qint64 byteSize = svg.size();
             m_rendererByteSizes[key] = byteSize;
             m_totalCachedBytes += byteSize;
             m_lruList.removeAll(key);
             m_lruList.prepend(key);
-            while (m_lruList.size() > m_maxCacheEntries) {
+            while (!m_lruList.isEmpty() && (m_lruList.size() > m_maxCacheEntries || m_totalCachedBytes > m_maxCacheBytes)) {
                 CacheKey oldest = m_lruList.takeLast();
                 m_rendererCache.remove(oldest);
                 m_totalCachedBytes -= m_rendererByteSizes.take(oldest);
@@ -211,7 +237,8 @@ void AsyncRenderService::requestRender(const QString &source, RenderKind kind) {
         if (m_rendererCache.contains(key)) {
             return;
         }
-        if (m_pendingRequests.value(key, 0) == m_currentGeneration) {
+        auto it = m_pendingRequests.constFind(key);
+        if (it != m_pendingRequests.cend() && it.value() == m_currentGeneration) {
             return;
         }
         m_pendingRequests[key] = m_currentGeneration;

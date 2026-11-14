@@ -72,6 +72,8 @@ private slots:
     void testMermaidBoundingBoxAndVisualNoClipping();
     void testAsyncRenderServiceShutdownWithInFlightTasks();
     void testNestedFractionGeometryAndHierarchy();
+    void testFirstRunAsyncRenderReliabilityAndByteBudget();
+    void testFirstRunDocumentGuiIntegration();
 };
 
 // Probe 1: UTF-8 BOM, CRLF, trailing spaces, no-newline exact byte-for-byte invariance
@@ -2543,6 +2545,158 @@ void TestProbes::testNestedFractionGeometryAndHierarchy() {
     }
     // Formula has 3 fractions: main fraction, numerator fraction \frac{2}{3}, denominator fraction \frac{5}{6}
     QCOMPARE(matchedFracs, 3);
+}
+
+// Probe 42: P0 First-run async render task scheduling, sync/async byte tracking, and memory budget
+void TestProbes::testFirstRunAsyncRenderReliabilityAndByteBudget() {
+    // 1. Fresh service instance without clearCache()
+    auto isolated = std::make_unique<Render::AsyncRenderService>();
+    QVERIFY(isolated != nullptr);
+    QCOMPARE(isolated->currentGeneration(), 1ULL);
+
+    QString formula = QStringLiteral("$$F=ma$$");
+    // Under P0 bug, isPending returned true and requestRender was ignored
+    QVERIFY(!isolated->isPending(formula, Render::RenderKind::Math));
+    QVERIFY(!isolated->isCached(formula, Render::RenderKind::Math));
+
+    QSignalSpy spy(isolated.get(), &Render::AsyncRenderService::renderReady);
+    isolated->requestRender(formula, Render::RenderKind::Math);
+
+    // Request MUST be accepted into pending queue
+    QVERIFY(isolated->isPending(formula, Render::RenderKind::Math));
+
+    // Wait for async render completion
+    QVERIFY(spy.wait(3000));
+    QCOMPARE(spy.count(), 1);
+    QVERIFY(isolated->isCached(formula, Render::RenderKind::Math));
+    QVERIFY(!isolated->isPending(formula, Render::RenderKind::Math));
+    QVERIFY(isolated->totalCachedBytes() > 0);
+
+    // 2. Interleaved Sync fallback and Async completion byte-counting verification
+    QString f2 = QStringLiteral("$$E=\\hbar\\omega$$");
+    isolated->requestRender(f2, Render::RenderKind::Math);
+
+    // Simultaneous sync fallback before worker finishes
+    auto syncRenderer = isolated->getRenderer(f2, Render::RenderKind::Math, true);
+    QVERIFY(syncRenderer != nullptr);
+    qint64 bytesAfterSync = isolated->totalCachedBytes();
+
+    // Allow worker task to finish and call onRenderCompleted
+    QTest::qWait(100);
+    QCoreApplication::processEvents();
+
+    // Cache byte count must remain exact and not double counted
+    QCOMPARE(isolated->totalCachedBytes(), bytesAfterSync);
+
+    // 3. Dual LRU and byte budget enforcement
+    isolated->setMaxCacheBytes(1024 * 1024); // 1 MB limit
+    for (int i = 0; i < 30; ++i) {
+        QString f = QStringLiteral("$$\\int_0^{%1} \\sin(x) dx$$").arg(i);
+        isolated->getRenderer(f, Render::RenderKind::Math, true);
+    }
+
+    QVERIFY(isolated->totalCachedBytes() <= isolated->maxCacheBytes());
+    QVERIFY(isolated->cacheCount() <= isolated->maxCacheEntries());
+}
+
+// Probe 43: P1 First-run cold document GUI integration and diverse Mermaid boundaries
+void TestProbes::testFirstRunDocumentGuiIntegration() {
+    // 1. First-run Cold Document Rendering with LaTeX and Mermaid without manual clearCache()
+    QString doc = QStringLiteral(
+        "# Cold First-Run Physics Notes\n\n"
+        "Newtonian mechanics foundation:\n\n"
+        "$$\\mathbf{F} = \\frac{d\\mathbf{p}}{dt}$$\n\n"
+        "Pipeline workflow architecture:\n\n"
+        "```mermaid\n"
+        "graph LR\n"
+        "Input[Editor Keystroke] --> AST[Incremental Tree-Sitter AST] --> Proj[Display Projection] --> UI[Native Viewport]\n"
+        "```\n\n"
+        "Relativistic energy:\n\n"
+        "$$E = \\sqrt{(pc)^2 + (m_0 c^2)^2}$$\n"
+    );
+
+    Core::TextBuffer buffer;
+    buffer.setText(doc);
+    Parser::MarkdownParserAdapter parser;
+    auto astRoot = parser.parse(buffer);
+    QVERIFY(astRoot != nullptr);
+
+    Mapping::DisplayProjection proj;
+    proj.buildProjection(astRoot, buffer, 0, false);
+    QVERIFY(proj.blockCount() >= 5);
+
+    Editor::LayoutEngine engine;
+    engine.layout(proj, 850.0);
+
+    // Request cold async render for all detected math and mermaid blocks
+    auto service = Render::AsyncRenderService::instance();
+    QVERIFY(service != nullptr);
+
+    QString f1 = QStringLiteral("$$\\mathbf{F} = \\frac{d\\mathbf{p}}{dt}$$");
+    QString f2 = QStringLiteral("$$E = \\sqrt{(pc)^2 + (m_0 c^2)^2}$$");
+    service->requestRender(f1, Render::RenderKind::Math);
+    service->requestRender(f2, Render::RenderKind::Math);
+
+    // Allow workers to complete
+    QTest::qWait(300);
+    QCoreApplication::processEvents();
+
+    QVERIFY(service->isCached(f1, Render::RenderKind::Math));
+    QVERIFY(service->isCached(f2, Render::RenderKind::Math));
+
+    // Paint to 1080p offscreen surface without crash or layout glitches
+    QImage offscreen(1920, 1080, QImage::Format_ARGB32_Premultiplied);
+    offscreen.fill(Qt::white);
+    QPainter painter(&offscreen);
+    engine.paint(&painter, QRectF(0, 0, 850.0, 1080.0), proj, -1, -1);
+    painter.end();
+
+    // 2. Diverse Mermaid Boundaries: Long Labels, Cyclic Feedback, and Chain Arrows
+    QString diverseMermaid = QStringLiteral(
+        "graph LR\n"
+        "ComponentWithVeryLongDescriptiveArchitecturalLabel[Very Long Descriptive System Component Name] --> ShortNode[Core Kernel]\n"
+        "ShortNode --> ComponentWithVeryLongDescriptiveArchitecturalLabel\n"
+        "Step1 --> Step2 --> Step3 --> Step4\n"
+    );
+
+    QByteArray svgBytes = Render::MermaidSvgRenderer::renderToSvg(diverseMermaid);
+    QString svg = QString::fromUtf8(svgBytes);
+
+    static QRegularExpression reViewBox(QStringLiteral("viewBox=\"0 0 ([\\d\\.]+) ([\\d\\.]+)\""));
+    auto m = reViewBox.match(svg);
+    QVERIFY(m.hasMatch());
+    qreal vbW = m.captured(1).toDouble();
+    qreal vbH = m.captured(2).toDouble();
+
+    // Wide diagram with long labels must comfortably accommodate text
+    QVERIFY(vbW >= 600.0);
+    QVERIFY(vbH >= 120.0);
+
+    // Pixel-level rasterization check: ensure 0 boundary pixels are clipped
+    QSvgRenderer svgRenderer(svgBytes);
+    QVERIFY(svgRenderer.isValid());
+
+    QSize imgSize(static_cast<int>(std::round(vbW)), static_cast<int>(std::round(vbH)));
+    QImage testImg(imgSize, QImage::Format_ARGB32_Premultiplied);
+    testImg.fill(Qt::transparent);
+
+    QPainter p(&testImg);
+    svgRenderer.render(&p);
+    p.end();
+
+    int borderClippedPixels = 0;
+    int tw = testImg.width();
+    int th = testImg.height();
+    for (int y = 0; y < th; ++y) {
+        for (int x = 0; x < tw; ++x) {
+            if (qAlpha(testImg.pixel(x, y)) > 0) {
+                if (x == 0 || x == tw - 1 || y == 0 || y == th - 1) {
+                    borderClippedPixels++;
+                }
+            }
+        }
+    }
+    QCOMPARE(borderClippedPixels, 0);
 }
 
 QTEST_MAIN(TestProbes)

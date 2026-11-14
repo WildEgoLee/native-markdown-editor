@@ -467,7 +467,7 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
     qreal contentWidth = std::max(360.0, (maxX + shiftX) + margin);
     qreal contentHeight = std::max(140.0, (maxY + shiftY) + margin);
 
-    qreal displayWidth = std::clamp(contentWidth, 360.0, 1400.0);
+    qreal displayWidth = std::clamp(contentWidth, 360.0, 3000.0);
     qreal displayHeight = displayWidth * (contentHeight / contentWidth);
     if (displayWidth == contentWidth) displayHeight = contentHeight;
 

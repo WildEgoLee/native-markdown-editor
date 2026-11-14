@@ -36,7 +36,7 @@ static QByteArray generateUnsupportedCard(const QString &diagramType, const QStr
         "  <rect x=\"4\" y=\"4\" width=\"452\" height=\"112\" rx=\"8\" fill=\"#F8FAFC\" stroke=\"#CBD5E1\" stroke-width=\"1.5\" />\n"
         "  <rect x=\"20\" y=\"20\" width=\"86\" height=\"22\" rx=\"4\" fill=\"#FEF3C7\" stroke=\"#F59E0B\" stroke-width=\"1\" />\n"
         "  <text x=\"63\" y=\"35\" font-family=\"'Segoe UI', -apple-system, sans-serif\" font-size=\"11\" font-weight=\"600\" fill=\"#B45309\" text-anchor=\"middle\">Mermaid</text>\n"
-        "  <text x=\"116\" y=\"35\" font-family=\"'Segoe UI', -apple-system, sans-serif\" font-size=\"12\" font-weight=\"600\" fill=\"#1E293B\">Unsupported Diagram: %1</text>\n"
+        "  <text x=\"116\" y=\"35\" font-family=\"'Segoe UI', -apple-system, sans-serif\" font-size=\"12\" font-weight=\"600\" fill=\"#1E293B\">Notice: %1</text>\n"
         "  <text x=\"20\" y=\"64\" font-family=\"'Segoe UI', -apple-system, sans-serif\" font-size=\"11\" fill=\"#64748B\">Preview supports Flowchart (TD/LR) and Sequence Diagrams.</text>\n"
         "  <text x=\"20\" y=\"88\" font-family=\"Consolas, 'Courier New', monospace\" font-size=\"11\" fill=\"#334155\">%2</text>\n"
         "</svg>\n").arg(escapeXml(diagramType)).arg(escapeXml(snippet));
@@ -83,9 +83,11 @@ QSize MermaidSvgRenderer::estimateSize(const QString &mermaidCode) {
     int lineCount = static_cast<int>(lines.size());
     bool isLR = firstLine.contains(QStringLiteral("LR")) || firstLine.contains(QStringLiteral("lr"));
     if (isLR) {
-        return QSize(std::clamp(lineCount * 120 + 200, 350, 1200), 180);
+        int w = std::clamp(lineCount * 110 + 220, 360, 1200);
+        return QSize(w, 200);
     }
-    return QSize(std::clamp(lineCount * 30 + 350, 350, 1200), std::clamp(lineCount * 65 + 100, 160, 1000));
+    int h = std::clamp(lineCount * 65 + 100, 160, 900);
+    return QSize(std::clamp(lineCount * 30 + 360, 360, 1100), h);
 }
 
 QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
@@ -158,19 +160,24 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
 
         int pCount = static_cast<int>(participants.size());
         qreal colWidth = 160.0;
-        qreal totalWidth = std::clamp(pCount * colWidth + 60.0, 380.0, 3000.0);
+        qreal contentWidth = pCount * colWidth + 80.0;
         qreal rowHeight = 48.0;
-        qreal totalHeight = std::clamp(static_cast<qreal>(messages.size()) * rowHeight + 110.0, 180.0, 3000.0);
+        qreal contentHeight = static_cast<qreal>(messages.size()) * rowHeight + 110.0;
+
+        qreal displayWidth = std::clamp(contentWidth, 380.0, 1400.0);
+        qreal displayHeight = displayWidth * (contentHeight / contentWidth);
+        if (displayWidth == contentWidth) displayHeight = contentHeight;
 
         QString svg;
         svg.append(QStringLiteral(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%1\" height=\"%2\" viewBox=\"0 0 %1 %2\">\n"
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%1\" height=\"%2\" viewBox=\"0 0 %3 %4\">\n"
             "  <defs>\n"
             "    <marker id=\"seq-arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"3.5\" orient=\"auto\">\n"
             "      <polygon points=\"0 0, 8 3.5, 0 7\" fill=\"#2563EB\" />\n"
             "    </marker>\n"
-            "  </defs>\n").arg(totalWidth).arg(totalHeight));
+            "  </defs>\n")
+            .arg(displayWidth).arg(displayHeight).arg(contentWidth).arg(contentHeight));
 
         QMap<QString, qreal> pX;
         for (int i = 0; i < pCount; ++i) {
@@ -179,7 +186,7 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
 
             // Lifeline dashed line
             svg.append(QStringLiteral("<line x1=\"%1\" y1=\"50\" x2=\"%1\" y2=\"%2\" stroke=\"#94A3B8\" stroke-width=\"1.5\" stroke-dasharray=\"4,4\" />\n")
-                .arg(x).arg(totalHeight - 20));
+                .arg(x).arg(contentHeight - 20));
 
             // Participant box top
             svg.append(QStringLiteral("<rect x=\"%1\" y=\"16\" width=\"100\" height=\"34\" rx=\"6\" fill=\"#F1F5F9\" stroke=\"#64748B\" stroke-width=\"1.5\" />\n")
@@ -216,10 +223,18 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
     QMap<QString, NodeInfo> nodes;
     QVector<EdgeInfo> edges;
 
-    static QRegularExpression reEdge(QStringLiteral("^([A-Za-z0-9_]+)(?:\\[(.*?)\\]|\\((.*?)\\)|\\{(.*?)\\}|\\(\\((.*?)\\)\\))?\\s*(-->|---|-.->|==>)(?:\\|(.*?)\\|)?\\s*([A-Za-z0-9_]+)(?:\\[(.*?)\\]|\\((.*?)\\)|\\{(.*?)\\}|\\(\\((.*?)\\)\\))?$"));
-    static QRegularExpression reNodeOnly(QStringLiteral("^([A-Za-z0-9_]+)(?:\\[(.*?)\\]|\\((.*?)\\)|\\{(.*?)\\}|\\(\\((.*?)\\)\\))$"));
+    static QRegularExpression reArrow(QStringLiteral(R"((-->|---|-.->|==>)(?:\|(.*?)\|)?)"));
+    static QRegularExpression reNode(QStringLiteral(R"(^\s*([A-Za-z0-9_]+)(?:\[(.*?)\]|\((.*?)\)|\{(.*?)\}|\(\((.*?)\)\))?\s*$)"));
 
-    auto extractNode = [&](const QString &id, const QString &box, const QString &round, const QString &diam, const QString &circ) {
+    auto extractNodeFromToken = [&](const QString &token) -> QString {
+        auto m = reNode.match(token);
+        if (!m.hasMatch()) return QString();
+        QString id = m.captured(1);
+        QString box = m.captured(2);
+        QString round = m.captured(3);
+        QString diam = m.captured(4);
+        QString circ = m.captured(5);
+
         if (!nodes.contains(id)) {
             NodeInfo n;
             n.id = id;
@@ -230,7 +245,17 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
             else { n.label = id; n.shape = QStringLiteral("round"); }
             n.w = std::max(110.0, static_cast<qreal>(n.label.length()) * 9.5 + 24.0);
             nodes[id] = n;
+        } else {
+            auto &n = nodes[id];
+            if (n.label == id) {
+                if (!box.isEmpty()) { n.label = box; n.shape = QStringLiteral("rect"); }
+                else if (!round.isEmpty()) { n.label = round; n.shape = QStringLiteral("round"); }
+                else if (!diam.isEmpty()) { n.label = diam; n.shape = QStringLiteral("diamond"); }
+                else if (!circ.isEmpty()) { n.label = circ; n.shape = QStringLiteral("circle"); }
+                n.w = std::max(110.0, static_cast<qreal>(n.label.length()) * 9.5 + 24.0);
+            }
         }
+        return id;
     };
 
     for (const QString &raw : rawLines) {
@@ -239,25 +264,57 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
             continue;
         }
 
-        auto em = reEdge.match(line);
-        if (em.hasMatch()) {
-            QString id1 = em.captured(1);
-            extractNode(id1, em.captured(2), em.captured(3), em.captured(4), em.captured(5));
+        // Split line by arrows to extract all node tokens and edge arrows
+        auto arrowIt = reArrow.globalMatch(line);
+        if (arrowIt.hasNext()) {
+            struct ArrowMatch {
+                int start;
+                int end;
+                QString arrow;
+                QString label;
+            };
+            QVector<ArrowMatch> arrows;
+            while (arrowIt.hasNext()) {
+                auto am = arrowIt.next();
+                arrows.append(ArrowMatch{
+                    static_cast<int>(am.capturedStart(0)),
+                    static_cast<int>(am.capturedEnd(0)),
+                    am.captured(1),
+                    am.captured(2)
+                });
+            }
 
-            QString arr = em.captured(6);
-            QString label = em.captured(7);
+            QStringList nodeTokens;
+            int lastPos = 0;
+            for (const auto &am : arrows) {
+                nodeTokens.append(line.mid(lastPos, am.start - lastPos).trimmed());
+                lastPos = am.end;
+            }
+            nodeTokens.append(line.mid(lastPos).trimmed());
 
-            QString id2 = em.captured(8);
-            extractNode(id2, em.captured(9), em.captured(10), em.captured(11), em.captured(12));
+            QStringList parsedIds;
+            for (const auto &tok : nodeTokens) {
+                parsedIds.append(extractNodeFromToken(tok));
+            }
 
-            edges.append(EdgeInfo{id1, id2, label, arr.contains(QStringLiteral("-.")), arr.contains(QStringLiteral("=="))});
+            for (int i = 0; i < arrows.size() && i + 1 < parsedIds.size(); ++i) {
+                QString from = parsedIds[i];
+                QString to = parsedIds[i + 1];
+                if (!from.isEmpty() && !to.isEmpty()) {
+                    edges.append(EdgeInfo{
+                        from,
+                        to,
+                        arrows[i].label,
+                        arrows[i].arrow.contains(QStringLiteral("-.")),
+                        arrows[i].arrow.contains(QStringLiteral("=="))
+                    });
+                }
+            }
             continue;
         }
 
-        auto nm = reNodeOnly.match(line);
-        if (nm.hasMatch()) {
-            extractNode(nm.captured(1), nm.captured(2), nm.captured(3), nm.captured(4), nm.captured(5));
-        }
+        // Single node declaration
+        extractNodeFromToken(line);
     }
 
     if (nodes.isEmpty()) {
@@ -266,6 +323,11 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
         d.label = QStringLiteral("Diagram");
         d.shape = QStringLiteral("round");
         nodes[d.id] = d;
+    }
+
+    // Safety check on pathological diagram sizes
+    if (nodes.size() > 150 || edges.size() > 300) {
+        return generateUnsupportedCard(QStringLiteral("Resource Limit"), QStringLiteral("Diagram exceeds 150 nodes / 300 edges limit"));
     }
 
     // 1. Cycle detection using DFS back-edge detection
@@ -318,7 +380,7 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
         if (!changed) break;
     }
 
-    // 3. Compact rank groups (only existing ranks, no empty rank overhead)
+    // 3. Compact rank groups
     QMap<int, QStringList> rankGroups;
     for (auto it = ranks.begin(); it != ranks.end(); ++it) {
         rankGroups[it.value()].append(it.key());
@@ -327,12 +389,8 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
     QList<int> sortedRanks = rankGroups.keys();
     std::sort(sortedRanks.begin(), sortedRanks.end());
 
-    qreal totalWidth = 0;
-    qreal totalHeight = 0;
-
     if (isLR) {
         qreal layerX = 30.0;
-        qreal maxColH = 0.0;
         for (int r : sortedRanks) {
             const auto &group = rankGroups[r];
             qreal curY = 30.0;
@@ -344,21 +402,13 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
                 maxW = std::max(maxW, n.w);
                 curY += n.h + 28.0;
             }
-            maxColH = std::max(maxColH, curY);
             layerX += maxW + 65.0;
         }
-        totalWidth = std::clamp(layerX, 360.0, 3000.0);
-        totalHeight = std::clamp(maxColH + 10.0, 140.0, 3000.0);
     } else {
         // Top-Down
         qreal layerY = 30.0;
-        qreal maxRowW = 0.0;
         for (int r : sortedRanks) {
             const auto &group = rankGroups[r];
-            qreal totalW = 0.0;
-            for (const auto &id : group) totalW += nodes[id].w + 24.0;
-            maxRowW = std::max(maxRowW, totalW);
-
             qreal curX = 30.0;
             for (const auto &id : group) {
                 auto &n = nodes[id];
@@ -368,22 +418,51 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
             }
             layerY += 42.0 + 50.0;
         }
-        totalWidth = std::clamp(maxRowW + 40.0, 360.0, 3000.0);
-        totalHeight = std::clamp(layerY, 140.0, 3000.0);
     }
 
-    QString svg;
-    svg.append(QStringLiteral(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%1\" height=\"%2\" viewBox=\"0 0 %1 %2\">\n"
-        "  <defs>\n"
-        "    <marker id=\"mermaid-arrow\" markerWidth=\"10\" markerHeight=\"10\" refX=\"9\" refY=\"3.5\" orient=\"auto\">\n"
-        "      <polygon points=\"0 0, 10 3.5, 0 7\" fill=\"#475569\" />\n"
-        "    </marker>\n"
-        "    <filter id=\"card-shadow\" x=\"-6%\" y=\"-6%\" width=\"112%\" height=\"116%\" filterUnits=\"userSpaceOnUse\">\n"
-        "      <feDropShadow dx=\"0\" dy=\"2\" stdDeviation=\"3\" flood-color=\"#0F172A\" flood-opacity=\"0.06\"/>\n"
-        "    </filter>\n"
-        "  </defs>\n").arg(totalWidth).arg(totalHeight));
+    // 4. Calculate actual bounding box across all nodes and edges to avoid any clipping
+    qreal minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+
+    for (const auto &n : nodes) {
+        minX = std::min(minX, n.x - 12.0);
+        maxX = std::max(maxX, n.x + n.w + 12.0);
+        minY = std::min(minY, n.y - 12.0);
+        maxY = std::max(maxY, n.y + n.h + 12.0);
+    }
+
+    // Calculate edge extent in bounding box
+    for (const auto &e : edges) {
+        if (!nodes.contains(e.from) || !nodes.contains(e.to)) continue;
+        const auto &n1 = nodes[e.from];
+        const auto &n2 = nodes[e.to];
+
+        if (e.from == e.to) {
+            minY = std::min(minY, n1.y - 36.0);
+            continue;
+        }
+
+        bool isBack = backEdges.contains(qMakePair(e.from, e.to)) || (ranks.value(e.to, 0) <= ranks.value(e.from, 0));
+        if (isBack) {
+            if (isLR) {
+                qreal arcY = std::max(n1.y + n1.h, n2.y + n2.h) + 36.0;
+                maxY = std::max(maxY, arcY + 12.0);
+            } else {
+                qreal arcX = std::max(n1.x + n1.w, n2.x + n2.w) + 38.0;
+                maxX = std::max(maxX, arcX + 12.0);
+            }
+        }
+    }
+
+    minX = std::min(minX, 0.0);
+    minY = std::min(minY, 0.0);
+    qreal contentWidth = std::max(360.0, maxX - minX + 24.0);
+    qreal contentHeight = std::max(140.0, maxY - minY + 24.0);
+
+    qreal displayWidth = std::clamp(contentWidth, 360.0, 1400.0);
+    qreal displayHeight = displayWidth * (contentHeight / contentWidth);
+    if (displayWidth == contentWidth) displayHeight = contentHeight;
+
+    QString elementsXml;
 
     // Draw Edges (with special handling for self-loops and back-edges)
     for (const auto &e : edges) {
@@ -400,7 +479,7 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
             qreal sy = n1.y;
             qreal tx = n1.x + n1.w * 0.25;
             qreal ty = n1.y;
-            svg.append(QStringLiteral("<path d=\"M %1 %2 C %1 %3, %4 %3, %4 %5\" fill=\"none\" stroke=\"#475569\" stroke-width=\"%6\"%7 marker-end=\"url(#mermaid-arrow)\" />\n")
+            elementsXml.append(QStringLiteral("<path d=\"M %1 %2 C %1 %3, %4 %3, %4 %5\" fill=\"none\" stroke=\"#475569\" stroke-width=\"%6\"%7 marker-end=\"url(#mermaid-arrow)\" />\n")
                 .arg(sx).arg(sy).arg(sy - 30).arg(tx).arg(ty - 2).arg(strokeWidth).arg(dash));
             continue;
         }
@@ -415,7 +494,7 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
                 qreal tx = n2.x + n2.w / 2.0;
                 qreal ty = n2.y + n2.h;
                 qreal arcY = std::max(sy, ty) + 32.0;
-                svg.append(QStringLiteral("<path d=\"M %1 %2 C %1 %3, %4 %3, %4 %5\" fill=\"none\" stroke=\"#475569\" stroke-width=\"%6\"%7 marker-end=\"url(#mermaid-arrow)\" />\n")
+                elementsXml.append(QStringLiteral("<path d=\"M %1 %2 C %1 %3, %4 %3, %4 %5\" fill=\"none\" stroke=\"#475569\" stroke-width=\"%6\"%7 marker-end=\"url(#mermaid-arrow)\" />\n")
                     .arg(sx).arg(sy).arg(arcY).arg(tx).arg(ty + 2).arg(strokeWidth).arg(dash));
             } else {
                 qreal sx = n1.x + n1.w;
@@ -423,7 +502,7 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
                 qreal tx = n2.x + n2.w;
                 qreal ty = n2.y + n2.h / 2.0;
                 qreal arcX = std::max(sx, tx) + 35.0;
-                svg.append(QStringLiteral("<path d=\"M %1 %2 C %3 %2, %3 %4, %5 %4\" fill=\"none\" stroke=\"#475569\" stroke-width=\"%6\"%7 marker-end=\"url(#mermaid-arrow)\" />\n")
+                elementsXml.append(QStringLiteral("<path d=\"M %1 %2 C %3 %2, %3 %4, %5 %4\" fill=\"none\" stroke=\"#475569\" stroke-width=\"%6\"%7 marker-end=\"url(#mermaid-arrow)\" />\n")
                     .arg(sx).arg(sy).arg(arcX).arg(ty).arg(tx + 2).arg(strokeWidth).arg(dash));
             }
             continue;
@@ -444,16 +523,16 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
         }
 
         if (std::abs(y1 - y2) < 4.0 || std::abs(x1 - x2) < 4.0) {
-            svg.append(QStringLiteral("<line x1=\"%1\" y1=\"%2\" x2=\"%3\" y2=\"%4\" stroke=\"#475569\" stroke-width=\"%5\"%6 marker-end=\"url(#mermaid-arrow)\" />\n")
+            elementsXml.append(QStringLiteral("<line x1=\"%1\" y1=\"%2\" x2=\"%3\" y2=\"%4\" stroke=\"#475569\" stroke-width=\"%5\"%6 marker-end=\"url(#mermaid-arrow)\" />\n")
                 .arg(x1).arg(y1).arg(x2).arg(y2).arg(strokeWidth).arg(dash));
         } else {
             qreal midX = (x1 + x2) / 2.0;
             qreal midY = (y1 + y2) / 2.0;
             if (isLR) {
-                svg.append(QStringLiteral("<path d=\"M %1 %2 C %3 %2, %3 %4, %5 %4\" fill=\"none\" stroke=\"#475569\" stroke-width=\"%6\"%7 marker-end=\"url(#mermaid-arrow)\" />\n")
+                elementsXml.append(QStringLiteral("<path d=\"M %1 %2 C %3 %2, %3 %4, %5 %4\" fill=\"none\" stroke=\"#475569\" stroke-width=\"%6\"%7 marker-end=\"url(#mermaid-arrow)\" />\n")
                     .arg(x1).arg(y1).arg(midX).arg(y2).arg(x2).arg(strokeWidth).arg(dash));
             } else {
-                svg.append(QStringLiteral("<path d=\"M %1 %2 C %1 %3, %4 %3, %4 %5\" fill=\"none\" stroke=\"#475569\" stroke-width=\"%6\"%7 marker-end=\"url(#mermaid-arrow)\" />\n")
+                elementsXml.append(QStringLiteral("<path d=\"M %1 %2 C %1 %3, %4 %3, %4 %5\" fill=\"none\" stroke=\"#475569\" stroke-width=\"%6\"%7 marker-end=\"url(#mermaid-arrow)\" />\n")
                     .arg(x1).arg(y1).arg(midY).arg(x2).arg(y2).arg(strokeWidth).arg(dash));
             }
         }
@@ -461,9 +540,9 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
         if (!e.label.isEmpty()) {
             qreal lx = (x1 + x2) / 2.0;
             qreal ly = (y1 + y2) / 2.0 - 4.0;
-            svg.append(QStringLiteral("<rect x=\"%1\" y=\"%2\" width=\"%3\" height=\"18\" rx=\"4\" fill=\"#FFFFFF\" fill-opacity=\"0.9\" />\n")
+            elementsXml.append(QStringLiteral("<rect x=\"%1\" y=\"%2\" width=\"%3\" height=\"18\" rx=\"4\" fill=\"#FFFFFF\" fill-opacity=\"0.9\" />\n")
                 .arg(lx - e.label.length() * 4.0).arg(ly - 13).arg(e.label.length() * 8.0 + 4.0));
-            svg.append(QStringLiteral("<text x=\"%1\" y=\"%2\" font-family=\"'Segoe UI', -apple-system, sans-serif\" font-size=\"11\" fill=\"#475569\" text-anchor=\"middle\">%3</text>\n")
+            elementsXml.append(QStringLiteral("<text x=\"%1\" y=\"%2\" font-family=\"'Segoe UI', -apple-system, sans-serif\" font-size=\"11\" fill=\"#475569\" text-anchor=\"middle\">%3</text>\n")
                 .arg(lx).arg(ly).arg(escapeXml(e.label)));
         }
     }
@@ -473,26 +552,40 @@ QByteArray MermaidSvgRenderer::renderToSvg(const QString &mermaidCode) {
         if (n.shape == QStringLiteral("diamond")) {
             qreal cx = n.x + n.w / 2.0;
             qreal cy = n.y + n.h / 2.0;
-            svg.append(QStringLiteral("<polygon points=\"%1 %2, %3 %4, %1 %5, %6 %4\" fill=\"#F8FAFC\" stroke=\"#0284C7\" stroke-width=\"1.8\" filter=\"url(#card-shadow)\" />\n")
+            elementsXml.append(QStringLiteral("<polygon points=\"%1 %2, %3 %4, %1 %5, %6 %4\" fill=\"#F8FAFC\" stroke=\"#0284C7\" stroke-width=\"1.8\" filter=\"url(#card-shadow)\" />\n")
                 .arg(cx).arg(n.y).arg(n.x + n.w).arg(cy).arg(n.y + n.h).arg(n.x));
         } else if (n.shape == QStringLiteral("circle")) {
             qreal r = n.h / 2.0;
             qreal cx = n.x + n.w / 2.0;
             qreal cy = n.y + n.h / 2.0;
-            svg.append(QStringLiteral("<circle cx=\"%1\" cy=\"%2\" r=\"%3\" fill=\"#F8FAFC\" stroke=\"#0D9488\" stroke-width=\"1.8\" filter=\"url(#card-shadow)\" />\n")
+            elementsXml.append(QStringLiteral("<circle cx=\"%1\" cy=\"%2\" r=\"%3\" fill=\"#F8FAFC\" stroke=\"#0D9488\" stroke-width=\"1.8\" filter=\"url(#card-shadow)\" />\n")
                 .arg(cx).arg(cy).arg(r));
         } else {
             // rect or round
             qreal rx = (n.shape == QStringLiteral("round")) ? 10.0 : 4.0;
-            svg.append(QStringLiteral("<rect x=\"%1\" y=\"%2\" width=\"%3\" height=\"%4\" rx=\"%5\" fill=\"#FFFFFF\" stroke=\"#3B82F6\" stroke-width=\"1.8\" filter=\"url(#card-shadow)\" />\n")
+            elementsXml.append(QStringLiteral("<rect x=\"%1\" y=\"%2\" width=\"%3\" height=\"%4\" rx=\"%5\" fill=\"#FFFFFF\" stroke=\"#3B82F6\" stroke-width=\"1.8\" filter=\"url(#card-shadow)\" />\n")
                 .arg(n.x).arg(n.y).arg(n.w).arg(n.h).arg(rx));
         }
 
-        svg.append(QStringLiteral("<text x=\"%1\" y=\"%2\" font-family=\"'Segoe UI', -apple-system, sans-serif\" font-size=\"12\" font-weight=\"500\" fill=\"#0F172A\" text-anchor=\"middle\">%3</text>\n")
+        elementsXml.append(QStringLiteral("<text x=\"%1\" y=\"%2\" font-family=\"'Segoe UI', -apple-system, sans-serif\" font-size=\"12\" font-weight=\"500\" fill=\"#0F172A\" text-anchor=\"middle\">%3</text>\n")
             .arg(n.x + n.w / 2.0).arg(n.y + n.h / 2.0 + 4.0).arg(escapeXml(n.label)));
     }
 
-    svg.append(QStringLiteral("</svg>"));
+    QString svg = QStringLiteral(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%1\" height=\"%2\" viewBox=\"0 0 %3 %4\">\n"
+        "  <defs>\n"
+        "    <marker id=\"mermaid-arrow\" markerWidth=\"10\" markerHeight=\"10\" refX=\"9\" refY=\"3.5\" orient=\"auto\">\n"
+        "      <polygon points=\"0 0, 10 3.5, 0 7\" fill=\"#475569\" />\n"
+        "    </marker>\n"
+        "    <filter id=\"card-shadow\" x=\"-6%\" y=\"-6%\" width=\"112%\" height=\"116%\" filterUnits=\"userSpaceOnUse\">\n"
+        "      <feDropShadow dx=\"0\" dy=\"2\" stdDeviation=\"3\" flood-color=\"#0F172A\" flood-opacity=\"0.06\"/>\n"
+        "    </filter>\n"
+        "  </defs>\n"
+        "%5\n"
+        "</svg>\n")
+        .arg(displayWidth).arg(displayHeight).arg(contentWidth).arg(contentHeight).arg(elementsXml);
+
     return svg.toUtf8();
 }
 

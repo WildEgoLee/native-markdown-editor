@@ -89,10 +89,10 @@ struct MathBox {
     bool hasWarning = false;
 };
 
-// Recursive box layout engine supporting nested \frac, scripts, and symbols
+// Recursive box layout engine supporting finite depth nested \frac, scripts, and symbols
 static MathBox renderBox(const QString &latex, int fontSize, int depth = 0) {
     MathBox box;
-    box.height = std::max(36, fontSize * 2);
+    box.height = std::max(36, static_cast<int>(fontSize * 2.0));
     box.baseline = std::max(24, static_cast<int>(fontSize * 1.4));
 
     if (latex.trimmed().isEmpty()) {
@@ -101,7 +101,7 @@ static MathBox renderBox(const QString &latex, int fontSize, int depth = 0) {
     }
 
     if (depth > 6) {
-        // Prevent infinite recursion on pathological inputs
+        // Controlled recursion limit for deeply nested constructs
         box.xml = QStringLiteral("<text x=\"0\" y=\"%1\" font-size=\"%2\" fill=\"#EF4444\">...</text>")
                       .arg(box.baseline).arg(fontSize);
         box.width = 20;
@@ -130,12 +130,12 @@ static MathBox renderBox(const QString &latex, int fontSize, int depth = 0) {
                         MathBox boxDen = renderBox(denStr, subFont, depth + 1);
                         MathBox boxSuffix = renderBox(suffix, fontSize, depth);
 
-                        int fracContentWidth = std::max(boxNum.width, boxDen.width) + 12;
-                        int fracHeight = boxNum.height + boxDen.height + 10;
+                        int fracContentWidth = std::max(boxNum.width, boxDen.width) + 14;
+                        int fracHeight = boxNum.height + boxDen.height + 16;
 
                         box.height = std::max({boxPrefix.height, fracHeight, boxSuffix.height});
-                        box.baseline = box.height / 2 + 4;
-                        int barY = box.baseline - 4;
+                        box.baseline = box.height / 2 + (fontSize / 4);
+                        int barY = box.baseline - (fontSize / 3);
 
                         QString elements;
                         int curX = 0;
@@ -150,16 +150,16 @@ static MathBox renderBox(const QString &latex, int fontSize, int depth = 0) {
 
                         // 2. Fraction (Numerator, Line, Denominator)
                         int numX = curX + (fracContentWidth - boxNum.width) / 2;
-                        int numY = barY - boxNum.height + (boxNum.height - boxNum.baseline) - 4;
+                        int numY = barY - 4 - boxNum.height;
                         elements.append(QStringLiteral("<g transform=\"translate(%1, %2)\">%3</g>\n")
                             .arg(numX).arg(numY).arg(boxNum.xml));
 
-                        // Bar
+                        // Fraction Bar
                         elements.append(QStringLiteral("<line x1=\"%1\" y1=\"%2\" x2=\"%3\" y2=\"%2\" stroke=\"#0F172A\" stroke-width=\"1.6\" />\n")
                             .arg(curX).arg(barY).arg(curX + fracContentWidth));
 
                         int denX = curX + (fracContentWidth - boxDen.width) / 2;
-                        int denY = barY + boxDen.baseline + 4;
+                        int denY = barY + 6;
                         elements.append(QStringLiteral("<g transform=\"translate(%1, %2)\">%3</g>\n")
                             .arg(denX).arg(denY).arg(boxDen.xml));
 
@@ -181,7 +181,7 @@ static MathBox renderBox(const QString &latex, int fontSize, int depth = 0) {
             }
         }
 
-        // If \frac was found but braces were unbalanced:
+        // If \frac syntax was unclosed
         box.hasWarning = true;
     }
 
@@ -279,8 +279,8 @@ QSize MathSvgRenderer::estimateSize(const QString &latexFormula) {
         latex = latex.mid(2, latex.length() - 4).trimmed();
     }
     MathBox box = renderBox(latex, 18);
-    int totalWidth = std::max(120, box.width + 40);
-    int totalHeight = std::max(50, box.height + (box.hasWarning ? 40 : 20));
+    int totalWidth = std::clamp(box.width + 40, 140, 2000);
+    int totalHeight = std::clamp(box.height + (box.hasWarning ? 40 : 20), 50, 1000);
     return QSize(totalWidth, totalHeight);
 }
 

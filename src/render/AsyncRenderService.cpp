@@ -10,14 +10,15 @@ namespace MarkdownTool::Render {
 
 class RenderTask : public QRunnable {
 public:
-    RenderTask(const CacheKey &key, quint64 generation, AsyncRenderService *service)
-        : m_key(key), m_generation(generation), m_service(service)
+    RenderTask(const CacheKey &key, quint64 generation, AsyncRenderService *service, std::weak_ptr<std::atomic<bool>> token)
+        : m_key(key), m_generation(generation), m_service(service), m_token(token)
     {
         setAutoDelete(true);
     }
 
     void run() override {
-        if (!m_service || m_service->isShuttingDown()) {
+        auto alive = m_token.lock();
+        if (!alive || !alive->load() || !m_service || m_service->isShuttingDown()) {
             return;
         }
 
@@ -28,27 +29,35 @@ public:
             svgData = MermaidSvgRenderer::renderToSvg(m_key.source);
         }
 
-        if (m_service && !m_service->isShuttingDown()) {
-            m_service->onRenderCompleted(m_key, svgData, m_generation);
+        alive = m_token.lock();
+        if (!alive || !alive->load() || !m_service || m_service->isShuttingDown()) {
+            return;
         }
+
+        m_service->onRenderCompleted(m_key, svgData, m_generation);
     }
 
 private:
     CacheKey m_key;
     quint64 m_generation = 0;
     AsyncRenderService *m_service = nullptr;
+    std::weak_ptr<std::atomic<bool>> m_token;
 };
 
 AsyncRenderService::AsyncRenderService(QObject *parent)
-    : QObject(parent)
+    : QObject(parent),
+      m_aliveToken(std::make_shared<std::atomic<bool>>(true))
 {
     m_threadPool.setMaxThreadCount(std::max(2, QThread::idealThreadCount()));
 }
 
 AsyncRenderService::~AsyncRenderService() {
     m_isShuttingDown.store(true);
+    if (m_aliveToken) {
+        m_aliveToken->store(false);
+    }
     m_threadPool.clear();
-    m_threadPool.waitForDone(2000);
+    m_threadPool.waitForDone(5000);
 }
 
 AsyncRenderService *AsyncRenderService::instance() {
@@ -61,23 +70,30 @@ void AsyncRenderService::onRenderCompleted(const CacheKey &key, const QByteArray
         return;
     }
 
-    QMetaObject::invokeMethod(this, [this, key, svgData, generation]() {
-        if (m_isShuttingDown.load()) {
+    QMetaObject::invokeMethod(this, [this, key, svgData, generation, weakToken = std::weak_ptr<std::atomic<bool>>(m_aliveToken)]() {
+        auto token = weakToken.lock();
+        if (!token || !token->load() || m_isShuttingDown.load()) {
             return;
         }
 
         std::shared_ptr<QSvgRenderer> renderer;
         {
             QMutexLocker locker(&m_mutex);
-            // If generation changed due to clearCache(), discard result
+            // Stale generation check: if clearCache() bumped the generation,
+            // discard the result. DO NOT remove key from m_pendingRequests if a newer generation owns it!
             if (generation != m_currentGeneration) {
-                m_pendingRequests.remove(key);
+                if (m_pendingRequests.value(key, 0) == generation) {
+                    m_pendingRequests.remove(key);
+                }
                 return;
             }
 
             renderer = std::make_shared<QSvgRenderer>(svgData);
             m_rendererCache[key] = renderer;
-            m_pendingRequests.remove(key);
+
+            if (m_pendingRequests.value(key, 0) == generation) {
+                m_pendingRequests.remove(key);
+            }
 
             // Update LRU
             m_lruList.removeAll(key);
@@ -96,6 +112,12 @@ void AsyncRenderService::onRenderCompleted(const CacheKey &key, const QByteArray
 bool AsyncRenderService::isCached(const QString &source, RenderKind kind) const {
     QMutexLocker locker(&m_mutex);
     return m_rendererCache.contains(CacheKey{kind, source});
+}
+
+bool AsyncRenderService::isPending(const QString &source, RenderKind kind) const {
+    QMutexLocker locker(&m_mutex);
+    CacheKey key{kind, source};
+    return m_pendingRequests.value(key, 0) == m_currentGeneration;
 }
 
 int AsyncRenderService::cacheCount() const {
@@ -155,14 +177,17 @@ void AsyncRenderService::requestRender(const QString &source, RenderKind kind) {
     quint64 gen = 0;
     {
         QMutexLocker locker(&m_mutex);
-        if (m_rendererCache.contains(key) || m_pendingRequests.contains(key)) {
+        if (m_rendererCache.contains(key)) {
             return;
         }
-        m_pendingRequests.insert(key);
+        if (m_pendingRequests.value(key, 0) == m_currentGeneration) {
+            return;
+        }
+        m_pendingRequests[key] = m_currentGeneration;
         gen = m_currentGeneration;
     }
 
-    m_threadPool.start(new RenderTask(key, gen, this));
+    m_threadPool.start(new RenderTask(key, gen, this, m_aliveToken));
 }
 
 void AsyncRenderService::clearCache() {

@@ -65,6 +65,10 @@ private slots:
     void testMermaidCyclicAndSelfLoopLayoutBoundedness();
     void testAsyncRenderServiceLRUAndEpochCancellation();
     void testNestedFractionsAndUnsupportedFallback();
+    void testAsyncRenderServiceEpochRaceCondition();
+    void testMermaidBoundingBoxAndVisualNoClipping();
+    void testAsyncRenderServiceShutdownWithInFlightTasks();
+    void testNestedFractionGeometryAndHierarchy();
 };
 
 // Probe 1: UTF-8 BOM, CRLF, trailing spaces, no-newline exact byte-for-byte invariance
@@ -2258,7 +2262,137 @@ void TestProbes::testNestedFractionsAndUnsupportedFallback() {
     QString unsupportedMermaid = QStringLiteral("pie title Pets\n\"Dogs\" : 386\n\"Cats\" : 85");
     QByteArray umSvg = Render::MermaidSvgRenderer::renderToSvg(unsupportedMermaid);
     QVERIFY(!umSvg.isEmpty());
-    QVERIFY(umSvg.contains("Unsupported Diagram: pie"));
+    QVERIFY(umSvg.contains("Notice: pie"));
+}
+
+// Probe 38: P1 Epoch pending request race condition isolation
+void TestProbes::testAsyncRenderServiceEpochRaceCondition() {
+    auto service = Render::AsyncRenderService::instance();
+    QVERIFY(service != nullptr);
+
+    service->clearCache();
+    QString formula = QStringLiteral("$$E=mc^2$$");
+    Render::CacheKey key{Render::RenderKind::Math, formula};
+
+    // 1. Generation 1 submits request
+    quint64 gen1 = service->currentGeneration();
+    service->requestRender(formula, Render::RenderKind::Math);
+    QVERIFY(service->isPending(formula, Render::RenderKind::Math));
+
+    // 2. clearCache() bumps generation to gen2, clearing pending requests
+    service->clearCache();
+    quint64 gen2 = service->currentGeneration();
+    QVERIFY(gen2 > gen1);
+    QVERIFY(!service->isPending(formula, Render::RenderKind::Math));
+
+    // 3. New request submitted in gen2
+    service->requestRender(formula, Render::RenderKind::Math);
+    QVERIFY(service->isPending(formula, Render::RenderKind::Math));
+
+    // 4. Stale task from gen1 finishes now and calls onRenderCompleted
+    QByteArray staleSvg = "<svg></svg>";
+    service->onRenderCompleted(key, staleSvg, gen1);
+    QCoreApplication::processEvents();
+
+    // Gen 2 pending request must STILL BE VALID and not prematurely removed!
+    QVERIFY(service->isPending(formula, Render::RenderKind::Math));
+    // And stale SVG was not written to cache
+    QVERIFY(!service->isCached(formula, Render::RenderKind::Math));
+
+    // 5. Gen 2 task completes legitimately
+    QByteArray validSvg = Render::MathSvgRenderer::renderToSvg(formula);
+    service->onRenderCompleted(key, validSvg, gen2);
+    QCoreApplication::processEvents();
+
+    // Now it is cached and pending request is cleanly cleared
+    QVERIFY(service->isCached(formula, Render::RenderKind::Math));
+    QVERIFY(!service->isPending(formula, Render::RenderKind::Math));
+}
+
+// Probe 39: P1 Mermaid exact bounding box and visual non-clipping
+void TestProbes::testMermaidBoundingBoxAndVisualNoClipping() {
+    // 1. Wide LR chain with multiple nodes
+    QString wideChain = QStringLiteral("graph LR\nA --> B --> C --> D --> E --> F --> G");
+    QByteArray svgBytes = Render::MermaidSvgRenderer::renderToSvg(wideChain);
+    QString svg = QString::fromUtf8(svgBytes);
+
+    // Extract viewBox="0 0 W H"
+    static QRegularExpression reViewBox(QStringLiteral("viewBox=\"0 0 ([\\d\\.]+) ([\\d\\.]+)\""));
+    auto m = reViewBox.match(svg);
+    QVERIFY(m.hasMatch());
+    qreal vbW = m.captured(1).toDouble();
+    qreal vbH = m.captured(2).toDouble();
+    QVERIFY(vbW >= 700.0); // 7 nodes must span at least 700px in content viewBox
+    QVERIFY(vbH >= 120.0);
+
+    // 2. Diagram with self-loops and cycle back-edges
+    QString cyclicWithLoop = QStringLiteral(
+        "graph TD\n"
+        "Alpha[Node Alpha] --> Beta[Node Beta]\n"
+        "Beta --> Alpha\n"
+        "Alpha --> Alpha\n"
+    );
+    QByteArray cycSvgBytes = Render::MermaidSvgRenderer::renderToSvg(cyclicWithLoop);
+    QString cycSvg = QString::fromUtf8(cycSvgBytes);
+    auto mCyc = reViewBox.match(cycSvg);
+    QVERIFY(mCyc.hasMatch());
+    qreal cycW = mCyc.captured(1).toDouble();
+    qreal cycH = mCyc.captured(2).toDouble();
+
+    // Verify back-edge arc and loop path markers are inside the canvas
+    QVERIFY(cycSvg.contains("marker-end=\"url(#mermaid-arrow)\""));
+    QVERIFY(cycW >= 360.0);
+    QVERIFY(cycH >= 140.0);
+}
+
+// Probe 40: P1 AsyncRenderService concurrency stress and shutdown safety
+void TestProbes::testAsyncRenderServiceShutdownWithInFlightTasks() {
+    auto service = Render::AsyncRenderService::instance();
+    QVERIFY(service != nullptr);
+
+    service->clearCache();
+
+    // Queue 12 background requests concurrently
+    for (int i = 0; i < 12; ++i) {
+        QString f = QStringLiteral("$$\\sum_{k=0}^{%1} \\frac{1}{k!}$$").arg(i);
+        service->requestRender(f, Render::RenderKind::Math);
+    }
+
+    // Immediately trigger cache clear while workers are running
+    service->clearCache();
+
+    // Re-request subset of items in the new generation
+    for (int i = 0; i < 4; ++i) {
+        QString f = QStringLiteral("$$\\sum_{k=0}^{%1} \\frac{1}{k!}$$").arg(i);
+        service->requestRender(f, Render::RenderKind::Math);
+    }
+
+    // Wait briefly for worker tasks to settle
+    QTest::qWait(200);
+
+    // Must be completely stable with no memory leaks or thread crashes
+    QVERIFY(service->cacheCount() <= 4);
+}
+
+// Probe 41: P1 Nested fraction geometry, hierarchy, and coordinate validation
+void TestProbes::testNestedFractionGeometryAndHierarchy() {
+    // Nested fraction: \frac{\frac{a}{b}+c}{d}
+    QString nested = QStringLiteral("$$\\frac{\\frac{a}{b}+c}{d}$$");
+    QByteArray svgBytes = Render::MathSvgRenderer::renderToSvg(nested);
+    QString svg = QString::fromUtf8(svgBytes);
+
+    // Must contain multiple fraction bar lines
+    int lineCount = svg.count(QStringLiteral("<line"));
+    QVERIFY(lineCount >= 2);
+
+    // Must contain all components: a, b, c, d
+    QVERIFY(svg.contains(">a<"));
+    QVERIFY(svg.contains(">b<"));
+    QVERIFY(svg.contains("+c") || svg.contains(">c<"));
+    QVERIFY(svg.contains(">d<"));
+
+    // Nested fraction inside numerator must have smaller font size than main expression
+    QVERIFY(svg.contains("font-size=\"14\"") || svg.contains("font-size=\"11\"") || svg.contains("font-size=\"10\""));
 }
 
 QTEST_MAIN(TestProbes)

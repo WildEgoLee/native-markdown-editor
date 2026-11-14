@@ -17,9 +17,13 @@ struct BlockLayoutData {
 
     // Cache signature for zero-cost layout reuse
     QString cachedText;
-    int cachedSegmentCount = 0;
+    QVector<Mapping::VisualSegment> cachedSegments;
     int cachedIndentLevel = 0;
+    int cachedHeadingLevel = 0;
+    int cachedMarginTop = 0;
+    int cachedMarginBottom = 0;
     bool cachedIsQuote = false;
+    bool cachedIsCodeBlock = false;
     Parser::NodeType cachedBlockType = Parser::NodeType::Paragraph;
     bool hasIme = false;
 };

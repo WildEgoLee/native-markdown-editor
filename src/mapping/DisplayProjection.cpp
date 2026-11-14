@@ -296,16 +296,25 @@ bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
             const auto &b2 = prevBlocks[i];
             if (b1.visualText != b2.visualText ||
                 b1.blockType != b2.blockType ||
+                b1.headingLevel != b2.headingLevel ||
                 b1.indentLevel != b2.indentLevel ||
+                b1.isQuote != b2.isQuote ||
+                b1.isCodeBlock != b2.isCodeBlock ||
+                b1.isTaskItem != b2.isTaskItem ||
                 b1.isTaskChecked != b2.isTaskChecked ||
+                b1.marginTop != b2.marginTop ||
+                b1.marginBottom != b2.marginBottom ||
                 b1.segments.size() != b2.segments.size())
             {
                 return true;
             }
             for (int s = 0; s < b1.segments.size(); ++s) {
-                if (b1.segments[s].type != b2.segments[s].type ||
-                    b1.segments[s].visualStart != b2.segments[s].visualStart ||
-                    b1.segments[s].visualLength != b2.segments[s].visualLength)
+                const auto &s1 = b1.segments[s];
+                const auto &s2 = b2.segments[s];
+                if (s1.type != s2.type ||
+                    s1.visualStart != s2.visualStart ||
+                    s1.visualLength != s2.visualLength ||
+                    s1.format != s2.format)
                 {
                     return true;
                 }

@@ -96,9 +96,13 @@ void LayoutEngine::layoutSingleBlock(const Mapping::VisualBlock &vBlock,
     currentY += y + vBlock.marginBottom;
 
     bData.cachedText = vBlock.visualText;
-    bData.cachedSegmentCount = vBlock.segments.size();
+    bData.cachedSegments = vBlock.segments;
     bData.cachedIndentLevel = vBlock.indentLevel;
+    bData.cachedHeadingLevel = vBlock.headingLevel;
+    bData.cachedMarginTop = vBlock.marginTop;
+    bData.cachedMarginBottom = vBlock.marginBottom;
     bData.cachedIsQuote = vBlock.isQuote;
+    bData.cachedIsCodeBlock = vBlock.isCodeBlock;
     bData.cachedBlockType = vBlock.blockType;
     bData.hasIme = hasImeHere;
 
@@ -115,9 +119,13 @@ void LayoutEngine::reuseBlock(const BlockLayoutData &src,
     bData.visualBlockIndex = blockIndex;
     bData.layout = src.layout; // Direct reuse without text shaping or line layout
     bData.cachedText = src.cachedText;
-    bData.cachedSegmentCount = src.cachedSegmentCount;
+    bData.cachedSegments = src.cachedSegments;
     bData.cachedIndentLevel = src.cachedIndentLevel;
+    bData.cachedHeadingLevel = src.cachedHeadingLevel;
+    bData.cachedMarginTop = src.cachedMarginTop;
+    bData.cachedMarginBottom = src.cachedMarginBottom;
     bData.cachedIsQuote = src.cachedIsQuote;
+    bData.cachedIsCodeBlock = src.cachedIsCodeBlock;
     bData.cachedBlockType = src.cachedBlockType;
     bData.hasIme = false;
 
@@ -139,11 +147,32 @@ bool LayoutEngine::isBlockLayoutEqual(const Mapping::VisualBlock &vBlock,
     if (!prevData.layout) {
         return false;
     }
-    return prevData.cachedText == vBlock.visualText &&
-           prevData.cachedSegmentCount == vBlock.segments.size() &&
-           prevData.cachedIndentLevel == vBlock.indentLevel &&
-           prevData.cachedIsQuote == vBlock.isQuote &&
-           prevData.cachedBlockType == vBlock.blockType;
+    if (prevData.cachedText != vBlock.visualText ||
+        prevData.cachedBlockType != vBlock.blockType ||
+        prevData.cachedHeadingLevel != vBlock.headingLevel ||
+        prevData.cachedIndentLevel != vBlock.indentLevel ||
+        prevData.cachedIsQuote != vBlock.isQuote ||
+        prevData.cachedIsCodeBlock != vBlock.isCodeBlock ||
+        prevData.cachedMarginTop != vBlock.marginTop ||
+        prevData.cachedMarginBottom != vBlock.marginBottom ||
+        prevData.cachedSegments.size() != vBlock.segments.size())
+    {
+        return false;
+    }
+
+    for (int s = 0; s < vBlock.segments.size(); ++s) {
+        const auto &s1 = vBlock.segments[s];
+        const auto &s2 = prevData.cachedSegments[s];
+        if (s1.type != s2.type ||
+            s1.visualStart != s2.visualStart ||
+            s1.visualLength != s2.visualLength ||
+            s1.format != s2.format)
+        {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 void LayoutEngine::layout(const Mapping::DisplayProjection &projection,

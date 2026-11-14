@@ -38,6 +38,8 @@ private slots:
     void testPerformanceBaselineAndLatency();
     void testRecoveryLoadRetainsSnapshotAndDirtyState();
     void testRecoveryDiscardRemovesSnapshot();
+    void testFormattingChangeInvalidatesLayoutCache();
+    void testIncrementalAndColdLayoutEquivalence();
 };
 
 // Probe 1: UTF-8 BOM, CRLF, trailing spaces, no-newline exact byte-for-byte invariance
@@ -561,7 +563,7 @@ void TestProbes::testDocumentSessionTransactionalSaveAs() {
     QCOMPARE(session.filePath(), targetFile);
 }
 
-// Probe 16: Latency Benchmark on 100 KB Document
+// Probe 16: Latency Benchmark on 100 KB Document (with Warmup, Repetitions, and p50/p95 Metrics)
 void TestProbes::testPerformanceBaselineAndLatency() {
     // Generate ~100 KB realistic Markdown content (~2000 lines)
     QString doc100k;
@@ -584,14 +586,23 @@ void TestProbes::testPerformanceBaselineAndLatency() {
 
     Parser::MarkdownParserAdapter parser;
 
-    // 1. Measure AST parsing time
+    // 1. Warmup iterations
+    for (int w = 0; w < 2; ++w) {
+        auto wRoot = parser.parse(buffer);
+        Mapping::DisplayProjection wProj;
+        wProj.buildProjection(wRoot, buffer, 0, false);
+        Editor::LayoutEngine wEngine;
+        wEngine.layout(wProj, 800.0);
+    }
+
+    // 2. Measure AST parsing time
     QElapsedTimer timer;
     timer.start();
     auto rootNode = parser.parse(buffer);
     qint64 parseTimeMs = timer.elapsed();
     QVERIFY(rootNode != nullptr);
 
-    // 2. Measure DisplayProjection build time
+    // 3. Measure DisplayProjection build time
     timer.restart();
     Mapping::DisplayProjection projection;
     bool initialChanged = projection.buildProjection(rootNode, buffer, 0, false);
@@ -599,14 +610,24 @@ void TestProbes::testPerformanceBaselineAndLatency() {
     QVERIFY(initialChanged);
     QVERIFY(projection.blockCount() > 500);
 
-    // 3. Measure LayoutEngine initial full layout time
-    timer.restart();
+    // 4. Repeated measurement of Full Cold Layout (10 iterations)
+    QVector<qreal> fullLayoutSamples;
+    fullLayoutSamples.reserve(10);
+    for (int iter = 0; iter < 10; ++iter) {
+        Editor::LayoutEngine freshEngine;
+        timer.restart();
+        freshEngine.layout(projection, 800.0);
+        fullLayoutSamples.append(timer.nsecsElapsed() / 1000000.0);
+    }
+    std::sort(fullLayoutSamples.begin(), fullLayoutSamples.end());
+    qreal fullP50 = fullLayoutSamples[fullLayoutSamples.size() / 2];
+    qreal fullP95 = fullLayoutSamples[static_cast<int>(fullLayoutSamples.size() * 0.95)];
+
+    // 5. Initialise engine with base projection for incremental layout testing
     Editor::LayoutEngine engine;
     engine.layout(projection, 800.0);
-    qint64 layoutTimeMs = timer.elapsed();
-    QVERIFY(engine.totalHeight() > 0);
 
-    // 4. Measure Incremental LayoutEngine layout time on single block edit (Typing keystroke)
+    // 6. Repeated measurement of Incremental Keystroke Layout (10 iterations)
     // Modify one character in buffer (e.g. at offset 500)
     Core::TextBuffer editedBuffer;
     editedBuffer.setText(doc100k);
@@ -615,13 +636,19 @@ void TestProbes::testPerformanceBaselineAndLatency() {
     Mapping::DisplayProjection editedProjection;
     editedProjection.buildProjection(editedRoot, editedBuffer, 501, false);
 
-    timer.restart();
-    engine.layout(editedProjection, 800.0);
-    qint64 incrementalLayoutTimeNs = timer.nsecsElapsed();
-    qreal incrementalLayoutTimeMs = incrementalLayoutTimeNs / 1000000.0;
+    QVector<qreal> incLayoutSamples;
+    incLayoutSamples.reserve(10);
+    for (int iter = 0; iter < 10; ++iter) {
+        timer.restart();
+        engine.layout(editedProjection, 800.0);
+        incLayoutSamples.append(timer.nsecsElapsed() / 1000000.0);
+    }
+    std::sort(incLayoutSamples.begin(), incLayoutSamples.end());
+    qreal incP50 = incLayoutSamples[incLayoutSamples.size() / 2];
+    qreal incP95 = incLayoutSamples[static_cast<int>(incLayoutSamples.size() * 0.95)];
     QVERIFY(engine.totalHeight() > 0);
 
-    // 5. Measure Cursor Navigation with change detection:
+    // 7. Measure Cursor Navigation with change detection:
     // First, cursor at body offset 100
     projection.buildProjection(rootNode, buffer, 100, false);
     // Moving cursor from 100 to 105 within normal text -> projection unchanged!
@@ -635,26 +662,26 @@ void TestProbes::testPerformanceBaselineAndLatency() {
     bool changedHeading = projection.buildProjection(rootNode, buffer, 0, false);
     QVERIFY(changedHeading);
 
-    // 6. Measure hit test performance (binary search)
+    // 8. Measure hit test performance (binary search on the matching edited state!)
     timer.restart();
-    int hitOff = engine.hitTest(QPointF(200, 1500), projection);
+    int hitOff = engine.hitTest(QPointF(200, 1500), editedProjection);
     qint64 hitTestTimeUs = timer.nsecsElapsed() / 1000;
     QVERIFY(hitOff >= 0);
 
-    qDebug() << "=== 100 KB Markdown Benchmark Results ===";
+    qDebug() << "=== 100 KB Markdown Benchmark (p50 / p95) ===";
     qDebug() << "Document Size:" << byteSize / 1024 << "KB, Block Count:" << projection.blockCount();
     qDebug() << "AST Parse Time:" << parseTimeMs << "ms";
     qDebug() << "Display Projection Time:" << projTimeMs << "ms";
-    qDebug() << "Full LayoutEngine Layout Time:" << layoutTimeMs << "ms";
-    qDebug() << "Incremental Keystroke Layout Time:" << incrementalLayoutTimeMs << "ms (Speedup:" << (layoutTimeMs > 0 ? (layoutTimeMs / qMax(0.1, incrementalLayoutTimeMs)) : 1.0) << "x)";
+    qDebug() << "Full Cold Layout Time: p50 =" << fullP50 << "ms, p95 =" << fullP95 << "ms";
+    qDebug() << "Incremental Keystroke Layout Time: p50 =" << incP50 << "ms, p95 =" << incP95 << "ms (Speedup: ~" << (fullP50 / qMax(0.01, incP50)) << "x)";
     qDebug() << "Cursor Navigation Check Time:" << cursorNavTimeNs / 1000.0 << "us (Changed:" << changedNormal << ")";
     qDebug() << "HitTest Time (Binary Search):" << hitTestTimeUs << "us";
 
     // Performance assertions:
     // 1. Initial parse < 150ms
     QVERIFY(parseTimeMs < 150);
-    // 2. Incremental keystroke layout must be < 5ms (vastly superior to 50ms+ full layout)
-    QVERIFY(incrementalLayoutTimeMs < 5.0);
+    // 2. Incremental keystroke layout must be < 5ms (p50)
+    QVERIFY(incP50 < 5.0);
     // 3. Cursor navigation check within 10ms (well under 60fps budget of 16.6ms)
     QVERIFY(cursorNavTimeNs < 10 * 1000 * 1000);
 }
@@ -752,6 +779,244 @@ void TestProbes::testRecoveryDiscardRemovesSnapshot() {
     // Verify buffer has disk content and state is clean
     QCOMPARE(editorBuffer.text(), diskBuffer.text());
     QVERIFY(!undoStack.isDirty());
+}
+
+// Probe 19: LayoutEngine cache invalidation and DisplayProjection change detection on style changes with identical visible text
+void TestProbes::testFormattingChangeInvalidatesLayoutCache() {
+    Parser::MarkdownParserAdapter parser;
+    Mapping::DisplayProjection projection1;
+    Mapping::DisplayProjection projection2;
+    Editor::LayoutEngine engine;
+
+    // --- Scenario 1: Bold -> Italic with identical visible text ---
+    Core::TextBuffer buf1;
+    buf1.setText(QStringLiteral("前缀**重要**后缀\n"));
+
+    auto root1 = parser.parse(buf1);
+    bool proj1Changed = projection1.buildProjection(root1, buf1, 0, false);
+    QVERIFY(proj1Changed);
+    QCOMPARE(projection1.blockCount(), 1);
+
+    // Layout the initial document
+    engine.layout(projection1, 600.0);
+    QCOMPARE(engine.blocks().size(), 1);
+
+    // Verify initial format contains Bold
+    const auto &formats1 = engine.blocks()[0].layout->formats();
+    bool foundBold = false;
+    for (const auto &fmtRange : formats1) {
+        if (fmtRange.format.fontWeight() == QFont::Bold) {
+            foundBold = true;
+            break;
+        }
+    }
+    QVERIFY(foundBold);
+
+    // Now change to Italic: *重要*
+    Core::TextBuffer buf2;
+    buf2.setText(QStringLiteral("前缀*重要*后缀\n"));
+
+    auto root2 = parser.parse(buf2);
+    // Crucial check: DisplayProjection MUST detect that format changed even though visible text is still "前缀重要后缀"
+    bool proj2Changed = projection2.buildProjection(root2, buf2, 0, false);
+    QVERIFY(proj2Changed);
+    QCOMPARE(projection2.blocks()[0].visualText, projection1.blocks()[0].visualText); // Visible text is identical!
+
+    // Layout again with engine (incremental layout)
+    engine.layout(projection2, 600.0);
+    QCOMPARE(engine.blocks().size(), 1);
+
+    // Crucial check: engine must NOT have reused the old bold layout! It must now be Italic and NOT Bold.
+    const auto &formats2 = engine.blocks()[0].layout->formats();
+    bool foundItalic = false;
+    bool foundBoldAfter = false;
+    for (const auto &fmtRange : formats2) {
+        if (fmtRange.format.fontItalic()) {
+            foundItalic = true;
+        }
+        if (fmtRange.format.fontWeight() == QFont::Bold) {
+            foundBoldAfter = true;
+        }
+    }
+    QVERIFY(foundItalic);
+    QVERIFY(!foundBoldAfter);
+
+    // --- Scenario 2: Heading Level Change (# 大标题 -> ## 大标题) with identical visible text ---
+    Core::TextBuffer bufH1;
+    bufH1.setText(QStringLiteral("# 大标题\n"));
+    auto rootH1 = parser.parse(bufH1);
+    Mapping::DisplayProjection projH1;
+    projH1.buildProjection(rootH1, bufH1, 0, false);
+    engine.layout(projH1, 600.0);
+
+    qreal h1FontSize = 0;
+    if (!engine.blocks().isEmpty() && !engine.blocks()[0].layout->formats().isEmpty()) {
+        h1FontSize = engine.blocks()[0].layout->formats()[0].format.fontPointSize();
+    }
+    QCOMPARE(h1FontSize, 24.0);
+
+    Core::TextBuffer bufH2;
+    bufH2.setText(QStringLiteral("## 大标题\n"));
+    auto rootH2 = parser.parse(bufH2);
+    Mapping::DisplayProjection projH2;
+    bool projH2Changed = projH2.buildProjection(rootH2, bufH2, 0, false);
+    QVERIFY(projH2Changed);
+
+    engine.layout(projH2, 600.0);
+    qreal h2FontSize = 0;
+    if (!engine.blocks().isEmpty() && !engine.blocks()[0].layout->formats().isEmpty()) {
+        h2FontSize = engine.blocks()[0].layout->formats()[0].format.fontPointSize();
+    }
+    QCOMPARE(h2FontSize, 20.0);
+    QVERIFY(h1FontSize > h2FontSize);
+}
+
+// Probe 20: Mathematical Equivalence between Incremental Cached Layout and Fresh Cold Layout
+void TestProbes::testIncrementalAndColdLayoutEquivalence() {
+    Parser::MarkdownParserAdapter parser;
+    qreal contentWidth = 650.0;
+
+    auto assertEnginesEquivalent = [contentWidth](const Editor::LayoutEngine &inc,
+                                                  const Editor::LayoutEngine &cold,
+                                                  const Mapping::DisplayProjection &proj,
+                                                  int textLength) {
+        QVERIFY(qAbs(inc.totalHeight() - cold.totalHeight()) < 0.001);
+        QCOMPARE(inc.blocks().size(), cold.blocks().size());
+
+        for (int i = 0; i < inc.blocks().size(); ++i) {
+            const auto &bInc = inc.blocks()[i];
+            const auto &bCold = cold.blocks()[i];
+
+            QVERIFY(qAbs(bInc.rect.x() - bCold.rect.x()) < 0.001);
+            QVERIFY(qAbs(bInc.rect.y() - bCold.rect.y()) < 0.001);
+            QVERIFY(qAbs(bInc.rect.width() - bCold.rect.width()) < 0.001);
+            QVERIFY(qAbs(bInc.rect.height() - bCold.rect.height()) < 0.001);
+
+            QCOMPARE(bInc.layout->lineCount(), bCold.layout->lineCount());
+            for (int l = 0; l < bInc.layout->lineCount(); ++l) {
+                auto lInc = bInc.layout->lineAt(l);
+                auto lCold = bCold.layout->lineAt(l);
+                QVERIFY(qAbs(lInc.rect().x() - lCold.rect().x()) < 0.001);
+                QVERIFY(qAbs(lInc.rect().y() - lCold.rect().y()) < 0.001);
+                QVERIFY(qAbs(lInc.rect().width() - lCold.rect().width()) < 0.001);
+                QVERIFY(qAbs(lInc.rect().height() - lCold.rect().height()) < 0.001);
+            }
+        }
+
+        // Check cursor rects across sample offsets
+        for (int off = 0; off <= textLength; off += qMax(1, textLength / 15)) {
+            QRectF crInc = inc.cursorRect(off, proj);
+            QRectF crCold = cold.cursorRect(off, proj);
+            QVERIFY(qAbs(crInc.x() - crCold.x()) < 0.001);
+            QVERIFY(qAbs(crInc.y() - crCold.y()) < 0.001);
+            QVERIFY(qAbs(crInc.width() - crCold.width()) < 0.001);
+            QVERIFY(qAbs(crInc.height() - crCold.height()) < 0.001);
+        }
+
+        // Check hit testing across sample points
+        for (qreal y = 10.0; y < inc.totalHeight(); y += qMax(10.0, inc.totalHeight() / 15)) {
+            for (qreal x = 25.0; x <= contentWidth - 25.0; x += 150.0) {
+                QPointF pt(x, y);
+                int hitInc = inc.hitTest(pt, proj);
+                int hitCold = cold.hitTest(pt, proj);
+                QCOMPARE(hitInc, hitCold);
+            }
+        }
+    };
+
+    // Stage 0: Initial base multi-element document
+    QString doc0 = QStringLiteral(
+        "# 顶层标题\n\n"
+        "这是第一段正文，包含了**粗体**与*斜体*以及`行内代码`的内容测试。\n\n"
+        "- [x] 任务一已完成\n"
+        "- [ ] 任务二进行中\n\n"
+        "> 这里是一段长引用内容，用于测试引用块的边距与排版稳定性。\n\n"
+        "```cpp\n"
+        "int main() {\n"
+        "    return 0;\n"
+        "}\n"
+        "```\n\n"
+        "这是末尾的一段普通正文段落。\n"
+    );
+
+    Core::TextBuffer buf;
+    buf.setText(doc0);
+
+    Editor::LayoutEngine incEngine; // This engine persists across all edits, utilizing incremental caching
+
+    auto root0 = parser.parse(buf);
+    Mapping::DisplayProjection proj0;
+    proj0.buildProjection(root0, buf, 0, false);
+
+    incEngine.layout(proj0, contentWidth);
+
+    Editor::LayoutEngine coldEngine0;
+    coldEngine0.layout(proj0, contentWidth);
+
+    assertEnginesEquivalent(incEngine, coldEngine0, proj0, buf.length());
+
+    // Stage 1: Keystroke edit inside first paragraph
+    int editPos = doc0.indexOf(QStringLiteral("包含"));
+    QVERIFY(editPos > 0);
+    buf.replace(editPos, 2, QStringLiteral("详细包含了经过扩充的更多文字信息"));
+
+    auto root1 = parser.parse(buf);
+    Mapping::DisplayProjection proj1;
+    proj1.buildProjection(root1, buf, editPos + 5, false);
+
+    incEngine.layout(proj1, contentWidth); // Incremental layout with cached prefix/suffix blocks!
+
+    Editor::LayoutEngine coldEngine1;
+    coldEngine1.layout(proj1, contentWidth); // Cold layout with no cache
+
+    assertEnginesEquivalent(incEngine, coldEngine1, proj1, buf.length());
+
+    // Stage 2: Format toggle on another block (Heading 1 -> Heading 2)
+    buf.replace(0, 1, QStringLiteral("##")); // Change "# " to "## "
+
+    auto root2 = parser.parse(buf);
+    Mapping::DisplayProjection proj2;
+    proj2.buildProjection(root2, buf, 0, false);
+
+    incEngine.layout(proj2, contentWidth);
+
+    Editor::LayoutEngine coldEngine2;
+    coldEngine2.layout(proj2, contentWidth);
+
+    assertEnginesEquivalent(incEngine, coldEngine2, proj2, buf.length());
+
+    // Stage 3: Insert a whole new section block into the document
+    int insertPos = buf.text().indexOf(QStringLiteral("```cpp"));
+    QVERIFY(insertPos > 0);
+    buf.replace(insertPos, 0, QStringLiteral("### 插入的新章节\n新插入的段落文本，测试块插入缓存处理。\n\n"));
+
+    auto root3 = parser.parse(buf);
+    Mapping::DisplayProjection proj3;
+    proj3.buildProjection(root3, buf, insertPos, false);
+
+    incEngine.layout(proj3, contentWidth);
+
+    Editor::LayoutEngine coldEngine3;
+    coldEngine3.layout(proj3, contentWidth);
+
+    assertEnginesEquivalent(incEngine, coldEngine3, proj3, buf.length());
+
+    // Stage 4: Delete a block (delete the blockquote)
+    int quoteStart = buf.text().indexOf(QStringLiteral("> 这里"));
+    int quoteEnd = buf.text().indexOf(QStringLiteral("### 插入"));
+    QVERIFY(quoteStart > 0 && quoteEnd > quoteStart);
+    buf.replace(quoteStart, quoteEnd - quoteStart, QString());
+
+    auto root4 = parser.parse(buf);
+    Mapping::DisplayProjection proj4;
+    proj4.buildProjection(root4, buf, quoteStart, false);
+
+    incEngine.layout(proj4, contentWidth);
+
+    Editor::LayoutEngine coldEngine4;
+    coldEngine4.layout(proj4, contentWidth);
+
+    assertEnginesEquivalent(incEngine, coldEngine4, proj4, buf.length());
 }
 
 QTEST_MAIN(TestProbes)

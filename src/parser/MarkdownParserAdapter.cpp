@@ -467,28 +467,36 @@ SemanticNodePtr MarkdownParserAdapter::incrementalParse(const SemanticNodePtr &p
     newRoot->contentRange.end += delta;
     newRoot->children.resize(previousRoot->children.size());
 
-    // Recursive helper to clone and shift subsequent nodes by delta
+    // Recursive helper to clone and shift subsequent nodes by delta without redundant children copy
     auto shiftNode = [delta](auto self, const SemanticNodePtr &src) -> SemanticNodePtr {
         if (!src) return nullptr;
-        auto cloned = std::make_shared<SemanticNode>(*src);
-        cloned->fullRange.start += delta;
-        cloned->fullRange.end += delta;
-        cloned->contentRange.start += delta;
-        cloned->contentRange.end += delta;
-        if (cloned->prefixRange.isValid() && !cloned->prefixRange.isEmpty()) {
-            cloned->prefixRange.start += delta;
-            cloned->prefixRange.end += delta;
-        }
-        if (cloned->suffixRange.isValid() && !cloned->suffixRange.isEmpty()) {
-            cloned->suffixRange.start += delta;
-            cloned->suffixRange.end += delta;
-        }
-        if (cloned->isTaskItem && cloned->taskCheckboxRange.isValid() && !cloned->taskCheckboxRange.isEmpty()) {
-            cloned->taskCheckboxRange.start += delta;
-            cloned->taskCheckboxRange.end += delta;
-        }
-        for (int c = 0; c < cloned->children.size(); ++c) {
-            cloned->children[c] = self(self, cloned->children[c]);
+        auto cloned = std::make_shared<SemanticNode>();
+        cloned->type = src->type;
+        cloned->fullRange = Core::SourceRange(src->fullRange.start + delta, src->fullRange.end + delta);
+        cloned->contentRange = Core::SourceRange(src->contentRange.start + delta, src->contentRange.end + delta);
+        cloned->prefixRange = (src->prefixRange.isValid() && !src->prefixRange.isEmpty())
+            ? Core::SourceRange(src->prefixRange.start + delta, src->prefixRange.end + delta)
+            : src->prefixRange;
+        cloned->suffixRange = (src->suffixRange.isValid() && !src->suffixRange.isEmpty())
+            ? Core::SourceRange(src->suffixRange.start + delta, src->suffixRange.end + delta)
+            : src->suffixRange;
+        cloned->taskCheckboxRange = (src->isTaskItem && src->taskCheckboxRange.isValid() && !src->taskCheckboxRange.isEmpty())
+            ? Core::SourceRange(src->taskCheckboxRange.start + delta, src->taskCheckboxRange.end + delta)
+            : src->taskCheckboxRange;
+        cloned->headingLevel = src->headingLevel;
+        cloned->isTaskItem = src->isTaskItem;
+        cloned->isTaskChecked = src->isTaskChecked;
+        cloned->taskCheckboxRange = (src->isTaskItem && src->taskCheckboxRange.isValid() && !src->taskCheckboxRange.isEmpty())
+            ? Core::SourceRange(src->taskCheckboxRange.start + delta, src->taskCheckboxRange.end + delta)
+            : src->taskCheckboxRange;
+        cloned->codeLanguage = src->codeLanguage;
+        cloned->linkUrl = src->linkUrl;
+        cloned->linkTitle = src->linkTitle;
+        cloned->textContent = src->textContent;
+
+        cloned->children.reserve(src->children.size());
+        for (const auto &child : src->children) {
+            cloned->children.push_back(self(self, child));
         }
         return cloned;
     };

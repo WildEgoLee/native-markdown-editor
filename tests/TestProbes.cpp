@@ -2,6 +2,7 @@
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QFile>
+#include <QElapsedTimer>
 
 #include "core/Position.h"
 #include "core/TextBuffer.h"
@@ -9,7 +10,9 @@
 #include "core/UndoStack.h"
 #include "parser/MarkdownParserAdapter.h"
 #include "mapping/DisplayProjection.h"
+#include "editor/LayoutEngine.h"
 #include "file/FileService.h"
+#include "file/DocumentSession.h"
 
 using namespace MarkdownTool;
 
@@ -29,6 +32,10 @@ private slots:
     void testUndoBranchSafetyAndSavepoints();
     void testSaveBreaksMergeGroup();
     void testExactSourceModeProjection();
+    void testComplexGraphemeClustersAndUnicode();
+    void testIMEPreeditLayoutAndCoordinates();
+    void testDocumentSessionTransactionalSaveAs();
+    void testPerformanceBaselineAndLatency();
 };
 
 // Probe 1: UTF-8 BOM, CRLF, trailing spaces, no-newline exact byte-for-byte invariance
@@ -442,6 +449,192 @@ void TestProbes::testExactSourceModeProjection() {
     QCOMPARE(projection.blocks()[1].visualText, QStringLiteral("def test():"));
     // Third block visualText must preserve the 4 spaces: "    print('hello')"
     QCOMPARE(projection.blocks()[2].visualText, QStringLiteral("    print('hello')"));
+}
+
+// Probe 13: Complex Grapheme Clusters, ZWJ sequences, skin-tone modifiers, combining diacritics
+void TestProbes::testComplexGraphemeClustersAndUnicode() {
+    // 1. ZWJ emoji: 👨‍👩‍👧‍👦 (Man + ZWJ + Woman + ZWJ + Girl + ZWJ + Boy)
+    QString zwjFamily = QStringLiteral("👨‍👩‍👧‍👦");
+    QCOMPARE(zwjFamily.length(), 11);
+    int nextFrom0 = Core::PositionTranslator::nextGraphemeOffset(zwjFamily, 0);
+    QCOMPARE(nextFrom0, 11);
+    int prevFrom11 = Core::PositionTranslator::prevGraphemeOffset(zwjFamily, 11);
+    QCOMPARE(prevFrom11, 0);
+
+    // 2. Emoji with skin tone modifier: 👍🏽 (U+1F44D + U+1F3FD)
+    QString skinTone = QStringLiteral("👍🏽");
+    QCOMPARE(skinTone.length(), 4);
+    QCOMPARE(Core::PositionTranslator::nextGraphemeOffset(skinTone, 0), 4);
+    QCOMPARE(Core::PositionTranslator::prevGraphemeOffset(skinTone, 4), 0);
+
+    // 3. Combining diacritical mark: e + \u0301 (é)
+    QString combining = QStringLiteral("e\u0301");
+    QCOMPARE(combining.length(), 2);
+    QCOMPARE(Core::PositionTranslator::nextGraphemeOffset(combining, 0), 2);
+    QCOMPARE(Core::PositionTranslator::prevGraphemeOffset(combining, 2), 0);
+
+    // 4. Windows CRLF in mixed text: "A\r\nB"
+    QString crlfSample = QStringLiteral("A\r\nB");
+    QCOMPARE(Core::PositionTranslator::nextGraphemeOffset(crlfSample, 1), 3); // from \r past \n to B
+    QCOMPARE(Core::PositionTranslator::prevGraphemeOffset(crlfSample, 3), 1); // from B past \r\n to A
+
+    // 5. Mixed sentence with Unicode clusters
+    QString mixed = QStringLiteral("你好 👨‍👩‍👧‍👦! 👍🏽 done");
+    int cur = 0;
+    while (cur < mixed.length()) {
+        int next = Core::PositionTranslator::nextGraphemeOffset(mixed, cur);
+        QVERIFY(next > cur);
+        int back = Core::PositionTranslator::prevGraphemeOffset(mixed, next);
+        QCOMPARE(back, cur);
+        cur = next;
+    }
+    QCOMPARE(cur, mixed.length());
+}
+
+// Probe 14: IME Preedit String Embedded into Visual Layout Engine
+void TestProbes::testIMEPreeditLayoutAndCoordinates() {
+    Core::TextBuffer buffer;
+    buffer.setText(QStringLiteral("# 标题\n这是一段测试正文内容。"));
+
+    Parser::MarkdownParserAdapter parser;
+    auto root = parser.parse(buffer);
+
+    Mapping::DisplayProjection projection;
+    projection.buildProjection(root, buffer, 0, false);
+
+    Editor::LayoutEngine engine;
+    qreal contentWidth = 600.0;
+
+    // Normal layout
+    engine.layout(projection, contentWidth);
+    QVERIFY(engine.totalHeight() > 0);
+    int initialBlockCount = engine.blocks().size();
+    QVERIFY(initialBlockCount >= 2);
+
+    // Now insert IME preedit: user is typing pinyin "ceshi" at offset 10 ("这是一段" after '段')
+    int preeditOffset = 10;
+    QString preeditStr = QStringLiteral("ceshi");
+    engine.layout(projection, contentWidth, preeditOffset, preeditStr);
+
+    // Verify block containing preedit has shifted text and contains "ceshi"
+    int targetBlockIdx = projection.findBlockIndexBySourceOffset(preeditOffset);
+    QVERIFY(targetBlockIdx >= 0 && targetBlockIdx < engine.blocks().size());
+    const auto &bData = engine.blocks()[targetBlockIdx];
+    QVERIFY(bData.layout->text().contains(QStringLiteral("ceshi")));
+
+    // Verify cursor rect during preedit
+    QRectF cRect = engine.cursorRect(preeditOffset, projection);
+    QVERIFY(cRect.isValid());
+    QVERIFY(cRect.width() > 0);
+    QVERIFY(cRect.height() > 0);
+}
+
+// Probe 15: DocumentSession Transactional Save As
+void TestProbes::testDocumentSessionTransactionalSaveAs() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    QString origFile = tempDir.filePath(QStringLiteral("original.md"));
+    QString targetFile = tempDir.filePath(QStringLiteral("save_as.md"));
+
+    Core::TextBuffer buffer;
+    buffer.setText(QStringLiteral("原文档内容"));
+
+    File::DocumentSession session;
+    session.resetToUntitled(buffer);
+    QVERIFY(session.isUntitled());
+
+    // Save as targetFile
+    auto res = session.saveAs(targetFile, buffer);
+    QVERIFY(res.success);
+    QCOMPARE(session.filePath(), targetFile);
+    QVERIFY(!session.isUntitled());
+    QVERIFY(QFile::exists(targetFile));
+
+    // Now attempt saveAs to an invalid path with illegal characters
+    QString invalidPath = tempDir.filePath(QStringLiteral("invalid_*<>?.md"));
+    auto failRes = session.saveAs(invalidPath, buffer);
+    QVERIFY(!failRes.success);
+    // Crucial check: m_currentFilePath must NOT have changed on failure!
+    QCOMPARE(session.filePath(), targetFile);
+}
+
+// Probe 16: Latency Benchmark on 100 KB Document
+void TestProbes::testPerformanceBaselineAndLatency() {
+    // Generate ~100 KB realistic Markdown content (~2000 lines)
+    QString doc100k;
+    doc100k.reserve(120 * 1024);
+    doc100k.append(QStringLiteral("# 性能基准测试文档 100KB\n\n"));
+    for (int i = 0; i < 300; ++i) {
+        doc100k.append(QStringLiteral("## 章节 %1: 原生架构与性能指标\n\n").arg(i + 1));
+        doc100k.append(QStringLiteral("这是一个由 **C++20** 与 **Qt 6** 原生驱动的高性能 Markdown 编辑器。\n"));
+        doc100k.append(QStringLiteral("- [x] 100% 原始字节一致性\n- [ ] 即时预览无闪烁\n- [x] 原生 IME 预编辑推开\n\n"));
+        doc100k.append(QStringLiteral("> 引用内容：测试无 WebView 下的纯原生文本排版效率与性能。\n\n"));
+        doc100k.append(QStringLiteral("```cpp\nvoid process(int x) {\n    int y = x * 2;\n}\n```\n\n"));
+        doc100k.append(QStringLiteral("| 参数 | 数值 | 状态 |\n|---|---|---|\n| p50 延迟 | 0.8ms | 优秀 |\n| 内存开销 | 45MB | 极低 |\n\n"));
+    }
+
+    int byteSize = doc100k.toUtf8().size();
+    QVERIFY(byteSize >= 90 * 1024); // at least ~90-100 KB
+
+    Core::TextBuffer buffer;
+    buffer.setText(doc100k);
+
+    Parser::MarkdownParserAdapter parser;
+
+    // 1. Measure AST parsing time
+    QElapsedTimer timer;
+    timer.start();
+    auto rootNode = parser.parse(buffer);
+    qint64 parseTimeMs = timer.elapsed();
+    QVERIFY(rootNode != nullptr);
+
+    // 2. Measure DisplayProjection build time
+    timer.restart();
+    Mapping::DisplayProjection projection;
+    bool initialChanged = projection.buildProjection(rootNode, buffer, 0, false);
+    qint64 projTimeMs = timer.elapsed();
+    QVERIFY(initialChanged);
+    QVERIFY(projection.blockCount() > 500);
+
+    // 3. Measure LayoutEngine layout time
+    timer.restart();
+    Editor::LayoutEngine engine;
+    engine.layout(projection, 800.0);
+    qint64 layoutTimeMs = timer.elapsed();
+    QVERIFY(engine.totalHeight() > 0);
+
+    // 4. Measure Cursor Navigation with change detection:
+    // First, cursor at body offset 100
+    projection.buildProjection(rootNode, buffer, 100, false);
+    // Moving cursor from 100 to 105 within normal text -> projection unchanged!
+    timer.restart();
+    bool changedNormal = projection.buildProjection(rootNode, buffer, 105, false);
+    qint64 cursorNavTimeNs = timer.nsecsElapsed();
+    // Must NOT have changed visual projection!
+    QVERIFY(!changedNormal);
+
+    // Moving cursor to offset 0 (into the Heading '# ') -> projection toggles marker!
+    bool changedHeading = projection.buildProjection(rootNode, buffer, 0, false);
+    QVERIFY(changedHeading);
+
+    // 5. Measure hit test performance
+    timer.restart();
+    int hitOff = engine.hitTest(QPointF(200, 1500), projection);
+    qint64 hitTestTimeUs = timer.nsecsElapsed() / 1000;
+    QVERIFY(hitOff >= 0);
+
+    qDebug() << "=== 100 KB Markdown Benchmark Results ===";
+    qDebug() << "Document Size:" << byteSize / 1024 << "KB, Block Count:" << projection.blockCount();
+    qDebug() << "AST Parse Time:" << parseTimeMs << "ms";
+    qDebug() << "Display Projection Time:" << projTimeMs << "ms";
+    qDebug() << "LayoutEngine Layout Time:" << layoutTimeMs << "ms";
+    qDebug() << "Cursor Navigation Check Time:" << cursorNavTimeNs / 1000.0 << "us (Changed:" << changedNormal << ")";
+    qDebug() << "HitTest Time:" << hitTestTimeUs << "us";
+
+    // Performance assertions: 100KB document (2400 blocks) must parse within 150ms and cursor navigation check within 10ms (well under 60fps budget of 16.6ms)
+    QVERIFY(parseTimeMs < 150);
+    QVERIFY(cursorNavTimeNs < 10 * 1000 * 1000); // < 10ms
 }
 
 QTEST_MAIN(TestProbes)

@@ -54,7 +54,7 @@ class DisplayProjection {
 public:
     DisplayProjection() = default;
 
-    void buildProjection(const Parser::SemanticNodePtr &rootNode,
+    bool buildProjection(const Parser::SemanticNodePtr &rootNode,
                          const Core::TextBuffer &buffer,
                          int cursorPos,
                          bool isSourceMode);

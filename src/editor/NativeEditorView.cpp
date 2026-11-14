@@ -85,9 +85,11 @@ void NativeEditorView::setCursorPos(int pos, bool keepAnchor) {
 
         // In live preview mode, cursor moving into/out of a syntax node may change active markers
         if (!m_isSourceMode) {
-            m_projection.buildProjection(m_rootNode, m_buffer, m_cursorPos, m_isSourceMode);
-            m_layoutEngine.layout(m_projection, viewport()->width());
-            updateScrollBars();
+            bool changed = m_projection.buildProjection(m_rootNode, m_buffer, m_cursorPos, m_isSourceMode);
+            if (changed) {
+                m_layoutEngine.layout(m_projection, viewport()->width());
+                updateScrollBars();
+            }
         }
 
         viewport()->update();
@@ -671,15 +673,15 @@ QVariant NativeEditorView::inputMethodQuery(Qt::InputMethodQuery query) const {
         QRectF cRect = m_layoutEngine.cursorRect(m_cursorPos, m_projection);
         cRect.translate(-horizontalScrollBar()->value(), -verticalScrollBar()->value());
         QRect localRect = cRect.toRect();
-        QPoint globalTopLeft = viewport()->mapToGlobal(localRect.topLeft());
-        return QRect(globalTopLeft, localRect.size());
+        localRect.moveTopLeft(viewport()->mapTo(this, localRect.topLeft()));
+        return localRect;
     }
     case Qt::ImAnchorRectangle: {
         QRectF aRect = m_layoutEngine.cursorRect(m_selectionAnchor, m_projection);
         aRect.translate(-horizontalScrollBar()->value(), -verticalScrollBar()->value());
         QRect localRect = aRect.toRect();
-        QPoint globalTopLeft = viewport()->mapToGlobal(localRect.topLeft());
-        return QRect(globalTopLeft, localRect.size());
+        localRect.moveTopLeft(viewport()->mapTo(this, localRect.topLeft()));
+        return localRect;
     }
     case Qt::ImSurroundingText: {
         int line = m_buffer.offsetToLineCol(m_cursorPos).line;

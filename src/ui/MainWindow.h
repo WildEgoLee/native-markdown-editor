@@ -55,6 +55,7 @@ private:
 
     File::DocumentSession m_session;
     QTimer *m_recoveryTimer = nullptr;
+    QTimer *m_outlineDebounceTimer = nullptr;
 };
 
 } // namespace MarkdownTool::UI

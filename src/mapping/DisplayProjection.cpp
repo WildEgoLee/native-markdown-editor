@@ -273,18 +273,46 @@ static void applyInlineStyles(const Parser::SemanticNodePtr &inlineNode,
     }
 }
 
-void DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
+bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
                                        const Core::TextBuffer &buffer,
                                        int cursorPos,
                                        bool isSourceMode)
 {
+    QVector<VisualBlock> prevBlocks = std::move(m_blocks);
     m_blocks.clear();
+
+    auto checkChanged = [&]() -> bool {
+        if (m_blocks.size() != prevBlocks.size()) {
+            return true;
+        }
+        for (int i = 0; i < m_blocks.size(); ++i) {
+            const auto &b1 = m_blocks[i];
+            const auto &b2 = prevBlocks[i];
+            if (b1.visualText != b2.visualText ||
+                b1.blockType != b2.blockType ||
+                b1.indentLevel != b2.indentLevel ||
+                b1.isTaskChecked != b2.isTaskChecked ||
+                b1.segments.size() != b2.segments.size())
+            {
+                return true;
+            }
+            for (int s = 0; s < b1.segments.size(); ++s) {
+                if (b1.segments[s].type != b2.segments[s].type ||
+                    b1.segments[s].visualStart != b2.segments[s].visualStart ||
+                    b1.segments[s].visualLength != b2.segments[s].visualLength)
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
 
     if (buffer.isEmpty()) {
         VisualBlock emptyBlock;
         emptyBlock.sourceRange = Core::SourceRange(0, 0);
         m_blocks.append(emptyBlock);
-        return;
+        return checkChanged();
     }
 
     if (isSourceMode) {
@@ -327,7 +355,7 @@ void DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
             emptyBlock.sourceRange = Core::SourceRange(0, 0);
             m_blocks.append(emptyBlock);
         }
-        return;
+        return checkChanged();
     }
 
     if (!rootNode) {
@@ -342,7 +370,7 @@ void DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
         seg.type = SegmentType::NormalText;
         emptyBlock.segments.append(seg);
         m_blocks.append(emptyBlock);
-        return;
+        return checkChanged();
     }
 
     // Traverse root children
@@ -363,6 +391,7 @@ void DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
         emptyBlock.segments.append(seg);
         m_blocks.append(emptyBlock);
     }
+    return checkChanged();
 }
 
 void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,

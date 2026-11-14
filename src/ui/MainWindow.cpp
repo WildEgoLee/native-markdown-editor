@@ -74,11 +74,18 @@ void MainWindow::setupUi() {
         m_editorView->setFocus();
     });
 
-    // Outline synchronization
+    // Outline synchronization (debounced & reusing editor AST - zero duplicate parsing!)
+    m_outlineDebounceTimer = new QTimer(this);
+    m_outlineDebounceTimer->setSingleShot(true);
+    m_outlineDebounceTimer->setInterval(200);
+    connect(m_outlineDebounceTimer, &QTimer::timeout, this, [this]() {
+        if (m_editorView && m_sidebar && m_sidebar->outlineWidget()) {
+            m_sidebar->outlineWidget()->updateOutline(m_editorView->rootNode(), m_editorView->buffer().text());
+        }
+    });
+
     connect(m_editorView, &Editor::NativeEditorView::textChanged, this, [this]() {
-        Parser::MarkdownParserAdapter parser;
-        auto root = parser.parse(m_editorView->buffer());
-        m_sidebar->outlineWidget()->updateOutline(root, m_editorView->buffer().text());
+        m_outlineDebounceTimer->start();
     });
 
     connect(m_sidebar->outlineWidget(), &OutlineWidget::headingClicked, this, [this](int offset) {

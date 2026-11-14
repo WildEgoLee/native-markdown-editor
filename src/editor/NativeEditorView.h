@@ -29,6 +29,8 @@ public:
     Core::UndoStack &undoStack() { return m_undoStack; }
     const Core::UndoStack &undoStack() const { return m_undoStack; }
 
+    Parser::SemanticNodePtr rootNode() const { return m_rootNode; }
+
     int cursorPos() const { return m_cursorPos; }
     int selectionAnchor() const { return m_selectionAnchor; }
     bool hasSelection() const { return m_cursorPos != m_selectionAnchor; }

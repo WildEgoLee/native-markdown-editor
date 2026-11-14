@@ -32,3 +32,4 @@ test_results.txt
 *.tmp
 *.tmp_*
 .tmp_*
+build_and_test.bat

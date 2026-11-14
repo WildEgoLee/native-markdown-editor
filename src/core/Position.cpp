@@ -1,5 +1,6 @@
 #include "Position.h"
 
+#include <QTextBoundaryFinder>
 #include <algorithm>
 
 namespace MarkdownTool::Core {
@@ -160,12 +161,14 @@ int PositionTranslator::prevGraphemeOffset(const QString &text, int currentOffse
     if (currentOffset <= 0) {
         return 0;
     }
-    int prev = currentOffset - 1;
-    // Check CRLF: if current is after \n and before is \r, move before \r
-    if (prev > 0 && text.at(prev) == u'\n' && text.at(prev - 1) == u'\r') {
-        prev = prev - 1;
-    } else if (prev > 0 && text.at(prev).isLowSurrogate() && text.at(prev - 1).isHighSurrogate()) {
-        prev = prev - 1;
+    if (currentOffset > text.length()) {
+        currentOffset = text.length();
+    }
+    QTextBoundaryFinder finder(QTextBoundaryFinder::Grapheme, text);
+    finder.setPosition(currentOffset);
+    int prev = finder.toPreviousBoundary();
+    if (prev < 0) {
+        return 0;
     }
     return prev;
 }
@@ -175,12 +178,14 @@ int PositionTranslator::nextGraphemeOffset(const QString &text, int currentOffse
     if (currentOffset >= len) {
         return len;
     }
-    int next = currentOffset + 1;
-    // Check CRLF: if current is at \r and next is \n, move past \n
-    if (next < len && text.at(currentOffset) == u'\r' && text.at(next) == u'\n') {
-        next = next + 1;
-    } else if (next < len && text.at(currentOffset).isHighSurrogate() && text.at(next).isLowSurrogate()) {
-        next = next + 1;
+    if (currentOffset < 0) {
+        currentOffset = 0;
+    }
+    QTextBoundaryFinder finder(QTextBoundaryFinder::Grapheme, text);
+    finder.setPosition(currentOffset);
+    int next = finder.toNextBoundary();
+    if (next < 0) {
+        return len;
     }
     return next;
 }

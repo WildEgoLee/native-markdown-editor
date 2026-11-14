@@ -29,7 +29,6 @@ jobs:
         host: 'windows'
         target: 'desktop'
         arch: 'win64_msvc2022_64'
-        modules: 'qtbase'
 
     - name: Configure CMake
       run: |
@@ -41,5 +40,23 @@ jobs:
 
     - name: Run Test Probes (CTest)
       run: |
-        cd build
-        ctest --output-on-failure -C Release
+        ctest --test-dir build --output-on-failure -C Release
+
+    - name: Deploy Qt Runtime & Package Artifact
+      run: |
+        windeployqt --release --no-translations --compiler-runtime build/MarkdownNativeEditor.exe
+        mkdir dist
+        copy build\MarkdownNativeEditor.exe dist\
+        copy build\*.dll dist\
+        xcopy /E /I /Y build\platforms dist\platforms\
+        xcopy /E /I /Y build\styles dist\styles\
+        copy LICENSE dist\
+        copy README.md dist\
+        copy welcome.md dist\
+        tar -czvf MarkdownNativeEditor-windows-x64.zip -C dist .
+
+    - name: Upload Build Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: MarkdownNativeEditor-windows-x64
+        path: MarkdownNativeEditor-windows-x64.zip

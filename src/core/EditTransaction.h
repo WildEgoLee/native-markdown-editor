@@ -42,11 +42,35 @@ public:
     const QVector<SingleEdit> &edits() const { return m_edits; }
     bool isEmpty() const { return m_edits.isEmpty(); }
 
-    void setSelectionBefore(const SelectionState &sel) { m_selectionBefore = sel; }
+    void setSelectionBefore(const SelectionState &sel) {
+        m_selectionBefore = sel;
+        m_selectionsBefore = {sel};
+    }
     const SelectionState &selectionBefore() const { return m_selectionBefore; }
 
-    void setSelectionAfter(const SelectionState &sel) { m_selectionAfter = sel; }
+    void setSelectionsBefore(const QVector<SelectionState> &sels) {
+        m_selectionsBefore = sels;
+        if (!sels.isEmpty()) m_selectionBefore = sels.first();
+    }
+    QVector<SelectionState> selectionsBefore() const {
+        if (!m_selectionsBefore.isEmpty()) return m_selectionsBefore;
+        return {m_selectionBefore};
+    }
+
+    void setSelectionAfter(const SelectionState &sel) {
+        m_selectionAfter = sel;
+        m_selectionsAfter = {sel};
+    }
     const SelectionState &selectionAfter() const { return m_selectionAfter; }
+
+    void setSelectionsAfter(const QVector<SelectionState> &sels) {
+        m_selectionsAfter = sels;
+        if (!sels.isEmpty()) m_selectionAfter = sels.first();
+    }
+    QVector<SelectionState> selectionsAfter() const {
+        if (!m_selectionsAfter.isEmpty()) return m_selectionsAfter;
+        return {m_selectionAfter};
+    }
 
     qint64 timestamp() const { return m_timestamp; }
     void setTimestamp(qint64 ts) { m_timestamp = ts; }
@@ -64,6 +88,8 @@ private:
     QVector<SingleEdit> m_edits;
     SelectionState m_selectionBefore;
     SelectionState m_selectionAfter;
+    QVector<SelectionState> m_selectionsBefore;
+    QVector<SelectionState> m_selectionsAfter;
     qint64 m_timestamp = 0;
     quint64 m_revisionBefore = 0;
     quint64 m_revisionAfter = 0;

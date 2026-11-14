@@ -58,6 +58,7 @@ void EditTransaction::merge(const EditTransaction &next) {
     }
 
     m_selectionAfter = next.m_selectionAfter;
+    m_selectionsAfter = next.m_selectionsAfter;
     m_timestamp = next.m_timestamp;
 }
 

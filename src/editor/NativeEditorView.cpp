@@ -45,14 +45,173 @@ NativeEditorView::NativeEditorView(QWidget *parent)
     connect(&m_buffer, &Core::TextBuffer::textReset, this, [this]() {
         m_cursorPos = 0;
         m_selectionAnchor = 0;
+        m_cursors = {Core::SelectionState(0, 0)};
         reparseAndRelayout();
         emit textChanged();
     });
 
+    m_cursors = {Core::SelectionState(0, 0)};
     reparseAndRelayout();
 }
 
 NativeEditorView::~NativeEditorView() = default;
+
+bool NativeEditorView::hasSelection() const {
+    if (m_cursors.isEmpty()) {
+        return m_cursorPos != m_selectionAnchor;
+    }
+    for (const auto &c : m_cursors) {
+        if (c.hasSelection()) return true;
+    }
+    return false;
+}
+
+void NativeEditorView::syncPrimaryCursor() {
+    if (m_cursors.isEmpty()) {
+        m_cursors.append(Core::SelectionState(m_selectionAnchor, m_cursorPos));
+    } else {
+        m_cursorPos = m_cursors.first().cursor;
+        m_selectionAnchor = m_cursors.first().anchor;
+    }
+}
+
+void NativeEditorView::normalizeCursors() {
+    if (m_cursors.isEmpty()) {
+        m_cursors.append(Core::SelectionState(m_selectionAnchor, m_cursorPos));
+        return;
+    }
+
+    int bufLen = m_buffer.length();
+    for (auto &c : m_cursors) {
+        c.cursor = qBound(0, c.cursor, bufLen);
+        c.anchor = qBound(0, c.anchor, bufLen);
+    }
+
+    std::sort(m_cursors.begin(), m_cursors.end(), [](const Core::SelectionState &a, const Core::SelectionState &b) {
+        if (a.selectionStart() != b.selectionStart()) {
+            return a.selectionStart() < b.selectionStart();
+        }
+        return a.selectionEnd() < b.selectionEnd();
+    });
+
+    QVector<Core::SelectionState> merged;
+    for (const auto &c : m_cursors) {
+        if (merged.isEmpty()) {
+            merged.append(c);
+            continue;
+        }
+        auto &last = merged.last();
+        if (!last.hasSelection() && !c.hasSelection()) {
+            if (last.cursor == c.cursor) {
+                continue;
+            }
+        } else {
+            if (c.selectionStart() <= last.selectionEnd()) {
+                int newStart = qMin(last.selectionStart(), c.selectionStart());
+                int newEnd = qMax(last.selectionEnd(), c.selectionEnd());
+                bool forward = c.cursor >= c.anchor;
+                last.anchor = forward ? newStart : newEnd;
+                last.cursor = forward ? newEnd : newStart;
+                continue;
+            }
+        }
+        merged.append(c);
+    }
+
+    m_cursors = merged;
+    syncPrimaryCursor();
+}
+
+void NativeEditorView::clearSecondaryCursors() {
+    if (m_cursors.size() > 1) {
+        m_cursors.resize(1);
+    }
+    syncPrimaryCursor();
+    viewport()->update();
+}
+
+void NativeEditorView::addCursor(int pos, int anchor) {
+    if (anchor < 0) {
+        anchor = pos;
+    }
+    int bufLen = m_buffer.length();
+    pos = qBound(0, pos, bufLen);
+    anchor = qBound(0, anchor, bufLen);
+    if (!m_isSourceMode) {
+        pos = m_projection.normalizeSourceCursor(pos, true);
+        anchor = m_projection.normalizeSourceCursor(anchor, true);
+    }
+    m_cursors.append(Core::SelectionState(anchor, pos));
+    normalizeCursors();
+    viewport()->update();
+}
+
+void NativeEditorView::setCursors(const QVector<Core::SelectionState> &cursors) {
+    m_cursors = cursors;
+    if (m_cursors.isEmpty()) {
+        m_cursors.append(Core::SelectionState(m_selectionAnchor, m_cursorPos));
+    }
+    normalizeCursors();
+    viewport()->update();
+}
+
+void NativeEditorView::addCursorAbove() {
+    if (m_cursors.isEmpty()) {
+        syncPrimaryCursor();
+    }
+    int topOffset = m_buffer.length() + 1;
+    Core::SelectionState topSel;
+    for (const auto &c : m_cursors) {
+        if (c.selectionStart() < topOffset) {
+            topOffset = c.selectionStart();
+            topSel = c;
+        }
+    }
+
+    auto lc = m_buffer.offsetToLineCol(topSel.cursor);
+    if (lc.line > 0) {
+        int targetLine = lc.line - 1;
+        int targetCol = lc.col;
+        int targetCursor = m_buffer.lineColToOffset(targetLine, targetCol);
+        int targetAnchor = targetCursor;
+        if (topSel.hasSelection()) {
+            auto alc = m_buffer.offsetToLineCol(topSel.anchor);
+            targetAnchor = m_buffer.lineColToOffset(targetLine, alc.col);
+        }
+        m_cursors.append(Core::SelectionState(targetAnchor, targetCursor));
+        normalizeCursors();
+        viewport()->update();
+    }
+}
+
+void NativeEditorView::addCursorBelow() {
+    if (m_cursors.isEmpty()) {
+        syncPrimaryCursor();
+    }
+    int botOffset = -1;
+    Core::SelectionState botSel;
+    for (const auto &c : m_cursors) {
+        if (c.selectionEnd() > botOffset) {
+            botOffset = c.selectionEnd();
+            botSel = c;
+        }
+    }
+
+    auto lc = m_buffer.offsetToLineCol(botSel.cursor);
+    if (lc.line + 1 < m_buffer.lineCount()) {
+        int targetLine = lc.line + 1;
+        int targetCol = lc.col;
+        int targetCursor = m_buffer.lineColToOffset(targetLine, targetCol);
+        int targetAnchor = targetCursor;
+        if (botSel.hasSelection()) {
+            auto alc = m_buffer.offsetToLineCol(botSel.anchor);
+            targetAnchor = m_buffer.lineColToOffset(targetLine, alc.col);
+        }
+        m_cursors.append(Core::SelectionState(targetAnchor, targetCursor));
+        normalizeCursors();
+        viewport()->update();
+    }
+}
 
 void NativeEditorView::onBlinkTimer() {
     m_cursorVisible = !m_cursorVisible;
@@ -78,6 +237,13 @@ void NativeEditorView::setCursorPos(int pos, bool keepAnchor) {
         m_cursorPos = clamped;
         if (!keepAnchor) {
             m_selectionAnchor = clamped;
+            m_cursors = {Core::SelectionState(m_selectionAnchor, m_cursorPos)};
+        } else {
+            if (m_cursors.isEmpty()) {
+                m_cursors.append(Core::SelectionState(m_selectionAnchor, m_cursorPos));
+            } else {
+                m_cursors[0] = Core::SelectionState(m_selectionAnchor, m_cursorPos);
+            }
         }
 
         m_cursorVisible = true;
@@ -102,6 +268,7 @@ void NativeEditorView::setCursorPos(int pos, bool keepAnchor) {
 void NativeEditorView::selectAll() {
     m_selectionAnchor = 0;
     m_cursorPos = m_buffer.length();
+    m_cursors = {Core::SelectionState(m_selectionAnchor, m_cursorPos)};
     viewport()->update();
 }
 
@@ -170,20 +337,189 @@ void NativeEditorView::executeEdit(int offset, int removeLength, const QString &
     // textChanged triggers reparseAndRelayout(), m_cursorPos is ALREADY the updated cursor!
     m_cursorPos = newCursor;
     m_selectionAnchor = newCursor;
+    m_cursors = {Core::SelectionState(newCursor, newCursor)};
 
     m_undoStack.push(tx, m_buffer);
 
     ensureCursorVisible();
 }
 
+void NativeEditorView::executeMultiEdit(const QString &insertText) {
+    if (m_cursors.size() <= 1) {
+        int s = qMin(m_cursorPos, m_selectionAnchor);
+        int len = qAbs(m_cursorPos - m_selectionAnchor);
+        executeEdit(s, len, insertText);
+        return;
+    }
+
+    normalizeCursors();
+    QVector<Core::SelectionState> cursorsAsc = m_cursors;
+    QVector<Core::SelectionState> newCursors;
+    int cumulativeShift = 0;
+
+    for (int i = 0; i < cursorsAsc.size(); ++i) {
+        int s = cursorsAsc[i].selectionStart();
+        int len = cursorsAsc[i].selectionLength();
+        int newPos = s + cumulativeShift + insertText.length();
+        newCursors.append(Core::SelectionState(newPos, newPos));
+        cumulativeShift += insertText.length() - len;
+    }
+
+    Core::EditTransaction tx;
+    tx.setSelectionsBefore(m_cursors);
+    tx.setSelectionsAfter(newCursors);
+    tx.setTimestamp(QDateTime::currentMSecsSinceEpoch());
+
+    for (int i = cursorsAsc.size() - 1; i >= 0; --i) {
+        int s = cursorsAsc[i].selectionStart();
+        int len = cursorsAsc[i].selectionLength();
+        QString oldText = m_buffer.substring(s, len);
+        tx.addEdit(s, oldText, insertText);
+    }
+
+    m_cursors = newCursors;
+    syncPrimaryCursor();
+    m_undoStack.push(tx, m_buffer);
+    ensureCursorVisible();
+}
+
+void NativeEditorView::executeMultiBackspace() {
+    if (m_cursors.size() <= 1) {
+        handleBackspaceKey();
+        return;
+    }
+
+    normalizeCursors();
+    if (hasSelection()) {
+        executeMultiEdit(QString());
+        return;
+    }
+
+    QVector<Core::SelectionState> cursorsAsc = m_cursors;
+    QVector<Core::SelectionState> newCursors;
+    int cumulativeShift = 0;
+
+    struct BackspaceEdit {
+        int offset;
+        int len;
+        QString oldText;
+    };
+    QVector<BackspaceEdit> editsAsc;
+
+    for (int i = 0; i < cursorsAsc.size(); ++i) {
+        int pos = cursorsAsc[i].cursor;
+        if (pos <= 0) {
+            int newPos = pos + cumulativeShift;
+            newCursors.append(Core::SelectionState(newPos, newPos));
+            continue;
+        }
+
+        int prevPos = Core::PositionTranslator::prevGraphemeOffset(m_buffer.text(), pos);
+        int delLen = pos - prevPos;
+        QString oldText = m_buffer.substring(prevPos, delLen);
+
+        int newPos = prevPos + cumulativeShift;
+        newCursors.append(Core::SelectionState(newPos, newPos));
+        cumulativeShift -= delLen;
+
+        editsAsc.append(BackspaceEdit{prevPos, delLen, oldText});
+    }
+
+    if (editsAsc.isEmpty()) {
+        return;
+    }
+
+    Core::EditTransaction tx;
+    tx.setSelectionsBefore(m_cursors);
+    tx.setSelectionsAfter(newCursors);
+    tx.setTimestamp(QDateTime::currentMSecsSinceEpoch());
+
+    for (int i = editsAsc.size() - 1; i >= 0; --i) {
+        tx.addEdit(editsAsc[i].offset, editsAsc[i].oldText, QString());
+    }
+
+    m_cursors = newCursors;
+    syncPrimaryCursor();
+    m_undoStack.push(tx, m_buffer);
+    ensureCursorVisible();
+}
+
+void NativeEditorView::executeMultiDelete() {
+    if (m_cursors.size() <= 1) {
+        if (hasSelection()) {
+            int s = qMin(m_cursorPos, m_selectionAnchor);
+            int len = qAbs(m_cursorPos - m_selectionAnchor);
+            executeEdit(s, len, QString());
+        } else if (m_cursorPos < m_buffer.length()) {
+            int next = Core::PositionTranslator::nextGraphemeOffset(m_buffer.text(), m_cursorPos);
+            executeEdit(m_cursorPos, next - m_cursorPos, QString());
+        }
+        return;
+    }
+
+    normalizeCursors();
+    if (hasSelection()) {
+        executeMultiEdit(QString());
+        return;
+    }
+
+    QVector<Core::SelectionState> cursorsAsc = m_cursors;
+    QVector<Core::SelectionState> newCursors;
+    int cumulativeShift = 0;
+
+    struct DeleteEdit {
+        int offset;
+        int len;
+        QString oldText;
+    };
+    QVector<DeleteEdit> editsAsc;
+
+    int bufLen = m_buffer.length();
+    for (int i = 0; i < cursorsAsc.size(); ++i) {
+        int pos = cursorsAsc[i].cursor;
+        if (pos >= bufLen) {
+            int newPos = pos + cumulativeShift;
+            newCursors.append(Core::SelectionState(newPos, newPos));
+            continue;
+        }
+
+        int nextPos = Core::PositionTranslator::nextGraphemeOffset(m_buffer.text(), pos);
+        int delLen = nextPos - pos;
+        QString oldText = m_buffer.substring(pos, delLen);
+
+        int newPos = pos + cumulativeShift;
+        newCursors.append(Core::SelectionState(newPos, newPos));
+        cumulativeShift -= delLen;
+
+        editsAsc.append(DeleteEdit{pos, delLen, oldText});
+    }
+
+    if (editsAsc.isEmpty()) {
+        return;
+    }
+
+    Core::EditTransaction tx;
+    tx.setSelectionsBefore(m_cursors);
+    tx.setSelectionsAfter(newCursors);
+    tx.setTimestamp(QDateTime::currentMSecsSinceEpoch());
+
+    for (int i = editsAsc.size() - 1; i >= 0; --i) {
+        tx.addEdit(editsAsc[i].offset, editsAsc[i].oldText, QString());
+    }
+
+    m_cursors = newCursors;
+    syncPrimaryCursor();
+    m_undoStack.push(tx, m_buffer);
+    ensureCursorVisible();
+}
+
 void NativeEditorView::undo() {
-    Core::SelectionState sel;
+    QVector<Core::SelectionState> sels;
     m_buffer.blockSignals(true);
-    bool ok = m_undoStack.undo(m_buffer, sel);
+    bool ok = m_undoStack.undo(m_buffer, sels);
     m_buffer.blockSignals(false);
     if (ok) {
-        m_cursorPos = sel.cursor;
-        m_selectionAnchor = sel.anchor;
+        setCursors(sels);
         reparseAndRelayout();
         emit textChanged();
         ensureCursorVisible();
@@ -191,13 +527,12 @@ void NativeEditorView::undo() {
 }
 
 void NativeEditorView::redo() {
-    Core::SelectionState sel;
+    QVector<Core::SelectionState> sels;
     m_buffer.blockSignals(true);
-    bool ok = m_undoStack.redo(m_buffer, sel);
+    bool ok = m_undoStack.redo(m_buffer, sels);
     m_buffer.blockSignals(false);
     if (ok) {
-        m_cursorPos = sel.cursor;
-        m_selectionAnchor = sel.anchor;
+        setCursors(sels);
         reparseAndRelayout();
         emit textChanged();
         ensureCursorVisible();
@@ -208,10 +543,18 @@ void NativeEditorView::copy() {
     if (!hasSelection()) {
         return;
     }
-    int s = qMin(m_cursorPos, m_selectionAnchor);
-    int e = qMax(m_cursorPos, m_selectionAnchor);
-    QString selected = m_buffer.substring(s, e - s);
-    QGuiApplication::clipboard()->setText(selected);
+    QStringList parts;
+    for (const auto &c : m_cursors) {
+        if (c.hasSelection()) {
+            parts.append(m_buffer.substring(c.selectionStart(), c.selectionLength()));
+        }
+    }
+    if (parts.isEmpty() && m_cursorPos != m_selectionAnchor) {
+        int s = qMin(m_cursorPos, m_selectionAnchor);
+        int e = qMax(m_cursorPos, m_selectionAnchor);
+        parts.append(m_buffer.substring(s, e - s));
+    }
+    QGuiApplication::clipboard()->setText(parts.join(u'\n'));
 }
 
 void NativeEditorView::cut() {
@@ -219,9 +562,13 @@ void NativeEditorView::cut() {
         return;
     }
     copy();
-    int s = qMin(m_cursorPos, m_selectionAnchor);
-    int e = qMax(m_cursorPos, m_selectionAnchor);
-    executeEdit(s, e - s, QString());
+    if (m_cursors.size() > 1) {
+        executeMultiEdit(QString());
+    } else {
+        int s = qMin(m_cursorPos, m_selectionAnchor);
+        int e = qMax(m_cursorPos, m_selectionAnchor);
+        executeEdit(s, e - s, QString());
+    }
 }
 
 void NativeEditorView::paste() {
@@ -229,6 +576,44 @@ void NativeEditorView::paste() {
     if (text.isEmpty()) {
         return;
     }
+    if (m_cursors.size() > 1) {
+        QStringList lines = text.split(u'\n');
+        if (lines.size() == m_cursors.size()) {
+            normalizeCursors();
+            QVector<Core::SelectionState> cursorsAsc = m_cursors;
+            QVector<Core::SelectionState> newCursors;
+            int cumulativeShift = 0;
+            for (int i = 0; i < cursorsAsc.size(); ++i) {
+                int s = cursorsAsc[i].selectionStart();
+                int len = cursorsAsc[i].selectionLength();
+                int newPos = s + cumulativeShift + lines[i].length();
+                newCursors.append(Core::SelectionState(newPos, newPos));
+                cumulativeShift += lines[i].length() - len;
+            }
+
+            Core::EditTransaction tx;
+            tx.setSelectionsBefore(m_cursors);
+            tx.setSelectionsAfter(newCursors);
+            tx.setTimestamp(QDateTime::currentMSecsSinceEpoch());
+
+            for (int i = cursorsAsc.size() - 1; i >= 0; --i) {
+                int s = cursorsAsc[i].selectionStart();
+                int len = cursorsAsc[i].selectionLength();
+                QString oldText = m_buffer.substring(s, len);
+                tx.addEdit(s, oldText, lines[i]);
+            }
+
+            m_cursors = newCursors;
+            syncPrimaryCursor();
+            m_undoStack.push(tx, m_buffer);
+            ensureCursorVisible();
+            return;
+        }
+
+        executeMultiEdit(text);
+        return;
+    }
+
     int s = qMin(m_cursorPos, m_selectionAnchor);
     int len = qAbs(m_cursorPos - m_selectionAnchor);
     executeEdit(s, len, text);
@@ -565,6 +950,30 @@ void NativeEditorView::keyPressEvent(QKeyEvent *event) {
         return;
     }
 
+    // Escape clears secondary cursors or deselects
+    if (event->key() == Qt::Key_Escape) {
+        if (m_cursors.size() > 1) {
+            clearSecondaryCursors();
+            return;
+        }
+        if (hasSelection()) {
+            setCursorPos(m_cursorPos, false);
+            return;
+        }
+    }
+
+    // Column selection hotkeys: Ctrl+Alt+Up / Down
+    if ((event->modifiers() & Qt::ControlModifier) && (event->modifiers() & Qt::AltModifier)) {
+        if (event->key() == Qt::Key_Up) {
+            addCursorAbove();
+            return;
+        }
+        if (event->key() == Qt::Key_Down) {
+            addCursorBelow();
+            return;
+        }
+    }
+
     // Hotkey: Ctrl+/ to toggle mode
     if ((event->modifiers() & Qt::ControlModifier) && event->key() == Qt::Key_Slash) {
         setSourceMode(!m_isSourceMode);
@@ -590,6 +999,89 @@ void NativeEditorView::keyPressEvent(QKeyEvent *event) {
     }
 
     bool shift = event->modifiers() & Qt::ShiftModifier;
+
+    if (m_cursors.size() > 1) {
+        switch (event->key()) {
+        case Qt::Key_Left: {
+            for (auto &c : m_cursors) {
+                int next = m_isSourceMode ? Core::PositionTranslator::prevGraphemeOffset(m_buffer.text(), c.cursor)
+                                          : m_projection.stepCursor(c.cursor, false, m_buffer);
+                c.cursor = next;
+                if (!shift) c.anchor = next;
+            }
+            normalizeCursors();
+            viewport()->update();
+            return;
+        }
+        case Qt::Key_Right: {
+            for (auto &c : m_cursors) {
+                int next = m_isSourceMode ? Core::PositionTranslator::nextGraphemeOffset(m_buffer.text(), c.cursor)
+                                          : m_projection.stepCursor(c.cursor, true, m_buffer);
+                c.cursor = next;
+                if (!shift) c.anchor = next;
+            }
+            normalizeCursors();
+            viewport()->update();
+            return;
+        }
+        case Qt::Key_Up: {
+            for (auto &c : m_cursors) {
+                auto lc = m_buffer.offsetToLineCol(c.cursor);
+                if (lc.line > 0) {
+                    c.cursor = m_buffer.lineColToOffset(lc.line - 1, lc.col);
+                }
+                if (!shift) c.anchor = c.cursor;
+            }
+            normalizeCursors();
+            viewport()->update();
+            return;
+        }
+        case Qt::Key_Down: {
+            for (auto &c : m_cursors) {
+                auto lc = m_buffer.offsetToLineCol(c.cursor);
+                if (lc.line + 1 < m_buffer.lineCount()) {
+                    c.cursor = m_buffer.lineColToOffset(lc.line + 1, lc.col);
+                }
+                if (!shift) c.anchor = c.cursor;
+            }
+            normalizeCursors();
+            viewport()->update();
+            return;
+        }
+        case Qt::Key_Home: {
+            for (auto &c : m_cursors) {
+                int line = m_buffer.offsetToLineCol(c.cursor).line;
+                c.cursor = m_buffer.lineStartOffset(line);
+                if (!shift) c.anchor = c.cursor;
+            }
+            normalizeCursors();
+            viewport()->update();
+            return;
+        }
+        case Qt::Key_End: {
+            for (auto &c : m_cursors) {
+                int line = m_buffer.offsetToLineCol(c.cursor).line;
+                c.cursor = m_buffer.lineEndOffset(line, false);
+                if (!shift) c.anchor = c.cursor;
+            }
+            normalizeCursors();
+            viewport()->update();
+            return;
+        }
+        case Qt::Key_Return:
+        case Qt::Key_Enter:
+            executeMultiEdit(QStringLiteral("\n"));
+            return;
+        case Qt::Key_Backspace:
+            executeMultiBackspace();
+            return;
+        case Qt::Key_Delete:
+            executeMultiDelete();
+            return;
+        default:
+            break;
+        }
+    }
 
     switch (event->key()) {
     case Qt::Key_Left: {
@@ -657,6 +1149,11 @@ void NativeEditorView::keyPressEvent(QKeyEvent *event) {
     // Normal text character input
     QString text = event->text();
     if (!text.isEmpty() && (text.at(0).isPrint() || text.at(0) == u'\t')) {
+        if (m_cursors.size() > 1) {
+            executeMultiEdit(text);
+            return;
+        }
+
         int s = qMin(m_cursorPos, m_selectionAnchor);
         int len = qAbs(m_cursorPos - m_selectionAnchor);
 
@@ -687,9 +1184,13 @@ void NativeEditorView::keyPressEvent(QKeyEvent *event) {
 
 void NativeEditorView::inputMethodEvent(QInputMethodEvent *event) {
     if (!event->commitString().isEmpty()) {
-        int s = qMin(m_cursorPos, m_selectionAnchor);
-        int len = qAbs(m_cursorPos - m_selectionAnchor);
-        executeEdit(s, len, event->commitString());
+        if (m_cursors.size() > 1) {
+            executeMultiEdit(event->commitString());
+        } else {
+            int s = qMin(m_cursorPos, m_selectionAnchor);
+            int len = qAbs(m_cursorPos - m_selectionAnchor);
+            executeEdit(s, len, event->commitString());
+        }
     }
 
     m_preeditString = event->preeditString();
@@ -773,6 +1274,14 @@ void NativeEditorView::mousePressEvent(QMouseEvent *event) {
         }
 
         int targetOffset = m_layoutEngine.hitTest(docPoint, m_projection);
+
+        // Alt + Click: Add multi-cursor
+        if (event->modifiers() & Qt::AltModifier) {
+            addCursor(targetOffset, targetOffset);
+            return;
+        }
+
+        clearSecondaryCursors();
         bool shift = event->modifiers() & Qt::ShiftModifier;
         setCursorPos(targetOffset, shift);
         m_isMouseSelecting = true;
@@ -851,17 +1360,18 @@ void NativeEditorView::paintEvent(QPaintEvent *event) {
                           viewport()->width(),
                           viewport()->height());
 
-    int selS = qMin(m_cursorPos, m_selectionAnchor);
-    int selE = qMax(m_cursorPos, m_selectionAnchor);
+    m_layoutEngine.paint(&painter, visibleDocRect, m_projection, m_cursors, m_preeditString);
 
-    m_layoutEngine.paint(&painter, visibleDocRect, m_projection, selS, selE, m_preeditString);
-
-    // Draw cursor
-    if (m_cursorVisible && hasFocus() && !hasSelection()) {
-        QRectF cRect = m_layoutEngine.cursorRect(m_cursorPos, m_projection);
+    // Draw cursor carets
+    if (m_cursorVisible && hasFocus()) {
         painter.setPen(Qt::NoPen);
         painter.setBrush(QColor(40, 100, 230)); // Modern primary blue cursor
-        painter.drawRect(cRect);
+        for (const auto &c : m_cursors) {
+            if (!c.hasSelection()) {
+                QRectF cRect = m_layoutEngine.cursorRect(c.cursor, m_projection);
+                painter.drawRect(cRect);
+            }
+        }
     }
 
     painter.restore();

@@ -338,6 +338,19 @@ void LayoutEngine::paint(QPainter *painter,
                          int selectionEnd,
                          const QString &preeditString)
 {
+    QVector<Core::SelectionState> sels;
+    if (selectionStart != selectionEnd) {
+        sels.append(Core::SelectionState(selectionStart, selectionEnd));
+    }
+    paint(painter, visibleRect, projection, sels, preeditString);
+}
+
+void LayoutEngine::paint(QPainter *painter,
+                         const QRectF &visibleRect,
+                         const Mapping::DisplayProjection &projection,
+                         const QVector<Core::SelectionState> &selections,
+                         const QString &preeditString)
+{
     if (m_blocks.isEmpty()) {
         return;
     }
@@ -373,33 +386,37 @@ void LayoutEngine::paint(QPainter *painter,
             painter->drawRoundedRect(QRectF(bData.rect.left() + 4, bData.rect.top(), 3.5, bData.rect.height()), 1.5, 1.5);
         }
 
-        // Selection highlight
-        if (selectionStart != selectionEnd && bData.layout) {
+        // Selection highlights (supports multiple selections)
+        if (!selections.isEmpty() && bData.layout) {
             int blockSourceStart = vBlock.sourceRange.start;
             int blockSourceEnd = vBlock.sourceRange.end;
 
-            int selS = qMax(selectionStart, blockSourceStart);
-            int selE = qMin(selectionEnd, blockSourceEnd);
+            for (const auto &sel : selections) {
+                if (!sel.hasSelection()) continue;
 
-            if (selS < selE) {
-                int vSelS = vBlock.sourceToVisual(selS);
-                int vSelE = vBlock.sourceToVisual(selE);
+                int selS = qMax(sel.selectionStart(), blockSourceStart);
+                int selE = qMin(sel.selectionEnd(), blockSourceEnd);
 
-                painter->setPen(Qt::NoPen);
-                painter->setBrush(QColor(180, 215, 255, 120));
+                if (selS < selE) {
+                    int vSelS = vBlock.sourceToVisual(selS);
+                    int vSelE = vBlock.sourceToVisual(selE);
 
-                for (int l = 0; l < bData.layout->lineCount(); ++l) {
-                    QTextLine line = bData.layout->lineAt(l);
-                    int lineStart = line.textStart();
-                    int lineEnd = lineStart + line.textLength();
+                    painter->setPen(Qt::NoPen);
+                    painter->setBrush(QColor(180, 215, 255, 120));
 
-                    int segS = qMax(vSelS, lineStart);
-                    int segE = qMin(vSelE, lineEnd);
-                    if (segS < segE) {
-                        qreal x1 = bData.rect.left() + line.cursorToX(segS);
-                        qreal x2 = bData.rect.left() + line.cursorToX(segE);
-                        QRectF selRect(qMin(x1, x2), bData.rect.top() + line.y(), qAbs(x2 - x1), line.height());
-                        painter->drawRect(selRect);
+                    for (int l = 0; l < bData.layout->lineCount(); ++l) {
+                        QTextLine line = bData.layout->lineAt(l);
+                        int lineStart = line.textStart();
+                        int lineEnd = lineStart + line.textLength();
+
+                        int segS = qMax(vSelS, lineStart);
+                        int segE = qMin(vSelE, lineEnd);
+                        if (segS < segE) {
+                            qreal x1 = bData.rect.left() + line.cursorToX(segS);
+                            qreal x2 = bData.rect.left() + line.cursorToX(segE);
+                            QRectF selRect(qMin(x1, x2), bData.rect.top() + line.y(), qAbs(x2 - x1), line.height());
+                            painter->drawRect(selRect);
+                        }
                     }
                 }
             }

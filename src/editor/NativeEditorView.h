@@ -33,7 +33,16 @@ public:
 
     int cursorPos() const { return m_cursorPos; }
     int selectionAnchor() const { return m_selectionAnchor; }
-    bool hasSelection() const { return m_cursorPos != m_selectionAnchor; }
+    bool hasSelection() const;
+
+    // Multi-cursor interface
+    const QVector<Core::SelectionState> &cursors() const { return m_cursors; }
+    int cursorCount() const { return m_cursors.size(); }
+    void addCursor(int pos, int anchor = -1);
+    void setCursors(const QVector<Core::SelectionState> &cursors);
+    void clearSecondaryCursors();
+    void addCursorAbove();
+    void addCursorBelow();
 
     bool isSourceMode() const { return m_isSourceMode; }
     void setSourceMode(bool enabled);
@@ -90,6 +99,11 @@ private slots:
 
 private:
     void executeEdit(int offset, int removeLength, const QString &insertText);
+    void executeMultiEdit(const QString &insertText);
+    void executeMultiBackspace();
+    void executeMultiDelete();
+    void normalizeCursors();
+    void syncPrimaryCursor();
     void handleEnterKey();
     void handleBackspaceKey();
     void handleTabKey(bool shiftPressed);
@@ -105,6 +119,7 @@ private:
 
     int m_cursorPos = 0;
     int m_selectionAnchor = 0;
+    QVector<Core::SelectionState> m_cursors;
 
     bool m_isSourceMode = false;
     bool m_cursorVisible = true;

@@ -4,6 +4,7 @@
 #include <QFile>
 #include <QElapsedTimer>
 #include <QImage>
+#include <QClipboard>
 #include <cmath>
 #include <random>
 
@@ -52,6 +53,8 @@ private slots:
     void testReferenceStyleLinkIncrementalSafety();
     void testDifferentialFuzzingEquivalence();
     void testLargeDocumentGuiInputLatency();
+    void testMultiCursorEditingAndUndo();
+    void testColumnSelectionAndMultiLinePaste();
 };
 
 // Probe 1: UTF-8 BOM, CRLF, trailing spaces, no-newline exact byte-for-byte invariance
@@ -1833,6 +1836,138 @@ void TestProbes::testLargeDocumentGuiInputLatency() {
     // Performance assertions with realistic headroom for virtualized cloud CI runners
     QVERIFY(avgDispatchMs < 50.0);  // Keystroke event dispatch under 50ms on 500 KB document in VM CI
     QVERIFY(paintMs < 500.0);        // Render under 500ms on headless VM CI without hardware GPU acceleration
+}
+
+// Probe 29: Multi-Cursor simultaneous typing, backspace, and atomic undo/redo
+void TestProbes::testMultiCursorEditingAndUndo() {
+    Editor::NativeEditorView view;
+    view.resize(800, 600);
+
+    QString initialDoc = QStringLiteral("line 1: apple\nline 2: banana\nline 3: cherry\n");
+    view.buffer().setText(initialDoc);
+
+    // Place primary cursor at start of line 1 (offset 0)
+    view.setCursorPos(0);
+    QCOMPARE(view.cursorCount(), 1);
+
+    // Add secondary cursors at start of line 2 and line 3
+    int line2Start = view.buffer().lineStartOffset(1);
+    int line3Start = view.buffer().lineStartOffset(2);
+    view.addCursor(line2Start);
+    view.addCursor(line3Start);
+
+    QCOMPARE(view.cursorCount(), 3);
+    QCOMPARE(view.cursors()[0].cursor, 0);
+    QCOMPARE(view.cursors()[1].cursor, line2Start);
+    QCOMPARE(view.cursors()[2].cursor, line3Start);
+
+    // Type "* " using Qt KeyPress events
+    QKeyEvent keyStar(QEvent::KeyPress, Qt::Key_Asterisk, Qt::NoModifier, QStringLiteral("*"));
+    QApplication::sendEvent(view.viewport(), &keyStar);
+    QKeyEvent keySpace(QEvent::KeyPress, Qt::Key_Space, Qt::NoModifier, QStringLiteral(" "));
+    QApplication::sendEvent(view.viewport(), &keySpace);
+
+    QString expectedAfterType = QStringLiteral("* line 1: apple\n* line 2: banana\n* line 3: cherry\n");
+    QCOMPARE(view.buffer().text(), expectedAfterType);
+    QCOMPARE(view.cursorCount(), 3);
+
+    // All cursors advanced by 2 characters (+ cumulative shifts)
+    QCOMPARE(view.cursors()[0].cursor, 2);
+    int newLine2Start = view.buffer().lineStartOffset(1);
+    int newLine3Start = view.buffer().lineStartOffset(2);
+    QCOMPARE(view.cursors()[1].cursor, newLine2Start + 2);
+    QCOMPARE(view.cursors()[2].cursor, newLine3Start + 2);
+
+    // Backspace to delete space
+    QKeyEvent keyBack(QEvent::KeyPress, Qt::Key_Backspace, Qt::NoModifier);
+    QApplication::sendEvent(view.viewport(), &keyBack);
+
+    QString expectedAfterBack = QStringLiteral("*line 1: apple\n*line 2: banana\n*line 3: cherry\n");
+    QCOMPARE(view.buffer().text(), expectedAfterBack);
+    QCOMPARE(view.cursorCount(), 3);
+
+    // Test multi-cursor Undo: undo backspace
+    view.undo();
+    QCOMPARE(view.buffer().text(), expectedAfterType);
+    QCOMPARE(view.cursorCount(), 3);
+
+    // Undo typing "* "
+    view.undo(); // Undo space
+    view.undo(); // Undo star
+    QCOMPARE(view.buffer().text(), initialDoc);
+    QCOMPARE(view.cursorCount(), 3);
+    QCOMPARE(view.cursors()[0].cursor, 0);
+    QCOMPARE(view.cursors()[1].cursor, line2Start);
+    QCOMPARE(view.cursors()[2].cursor, line3Start);
+
+    // Redo typing
+    view.redo();
+    view.redo();
+    QCOMPARE(view.buffer().text(), expectedAfterType);
+    QCOMPARE(view.cursorCount(), 3);
+
+    // Test Escape to clear secondary cursors
+    QKeyEvent keyEsc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+    QApplication::sendEvent(view.viewport(), &keyEsc);
+    QCOMPARE(view.cursorCount(), 1);
+}
+
+// Probe 30: Column selection (Ctrl+Alt+Up/Down), multi-line selection, and aligned paste
+void TestProbes::testColumnSelectionAndMultiLinePaste() {
+    Editor::NativeEditorView view;
+    view.resize(800, 600);
+
+    QString text = QStringLiteral("AAA\nBBB\nCCC\n");
+    view.buffer().setText(text);
+    view.setCursorPos(0);
+
+    // Column selection down twice using addCursorBelow
+    view.addCursorBelow();
+    view.addCursorBelow();
+    QCOMPARE(view.cursorCount(), 3);
+    QCOMPARE(view.cursors()[0].cursor, 0);
+    QCOMPARE(view.cursors()[1].cursor, 4);
+    QCOMPARE(view.cursors()[2].cursor, 8);
+
+    // Select 3 characters right with Shift+Right
+    for (int i = 0; i < 3; ++i) {
+        QKeyEvent keyRight(QEvent::KeyPress, Qt::Key_Right, Qt::ShiftModifier);
+        QApplication::sendEvent(view.viewport(), &keyRight);
+    }
+
+    QVERIFY(view.hasSelection());
+    QCOMPARE(view.cursors()[0].selectionLength(), 3);
+    QCOMPARE(view.cursors()[1].selectionLength(), 3);
+    QCOMPARE(view.cursors()[2].selectionLength(), 3);
+
+    // Copy multi-selection
+    view.copy();
+    QCOMPARE(QGuiApplication::clipboard()->text(), QStringLiteral("AAA\nBBB\nCCC"));
+
+    // Move to end of lines
+    QKeyEvent keyEnd(QEvent::KeyPress, Qt::Key_End, Qt::NoModifier);
+    QApplication::sendEvent(view.viewport(), &keyEnd);
+    QVERIFY(!view.hasSelection());
+    QCOMPARE(view.cursorCount(), 3);
+    QCOMPARE(view.cursors()[0].cursor, 3);
+    QCOMPARE(view.cursors()[1].cursor, 7);
+    QCOMPARE(view.cursors()[2].cursor, 11);
+
+    // Aligned multi-line paste: 3 lines match 3 cursors
+    QGuiApplication::clipboard()->setText(QStringLiteral("111\n222\n333"));
+    view.paste();
+
+    QString expected = QStringLiteral("AAA111\nBBB222\nCCC333\n");
+    QCOMPARE(view.buffer().text(), expected);
+    QCOMPARE(view.cursorCount(), 3);
+
+    // Undo aligned paste
+    view.undo();
+    QCOMPARE(view.buffer().text(), text);
+    QCOMPARE(view.cursorCount(), 3);
+    QCOMPARE(view.cursors()[0].cursor, 3);
+    QCOMPARE(view.cursors()[1].cursor, 7);
+    QCOMPARE(view.cursors()[2].cursor, 11);
 }
 
 QTEST_MAIN(TestProbes)

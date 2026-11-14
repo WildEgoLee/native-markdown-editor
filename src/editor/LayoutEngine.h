@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/EditTransaction.h"
 #include "mapping/DisplayProjection.h"
 
 #include <QTextLayout>
@@ -42,6 +43,12 @@ public:
 
     int hitTest(const QPointF &point, const Mapping::DisplayProjection &projection) const;
     QRectF cursorRect(int sourceOffset, const Mapping::DisplayProjection &projection) const;
+
+    void paint(QPainter *painter,
+               const QRectF &visibleRect,
+               const Mapping::DisplayProjection &projection,
+               const QVector<Core::SelectionState> &selections,
+               const QString &preeditString = QString());
 
     void paint(QPainter *painter,
                const QRectF &visibleRect,

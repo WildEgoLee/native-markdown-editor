@@ -61,6 +61,13 @@ void UndoStack::push(const EditTransaction &transaction, TextBuffer &buffer) {
 }
 
 bool UndoStack::undo(TextBuffer &buffer, SelectionState &outSelection) {
+    QVector<SelectionState> sels;
+    bool ok = undo(buffer, sels);
+    outSelection = sels.isEmpty() ? SelectionState() : sels.first();
+    return ok;
+}
+
+bool UndoStack::undo(TextBuffer &buffer, QVector<SelectionState> &outSelections) {
     if (m_index <= 0) {
         return false;
     }
@@ -76,7 +83,7 @@ bool UndoStack::undo(TextBuffer &buffer, SelectionState &outSelection) {
         buffer.replace(edit.offset, edit.newText.length(), edit.oldText);
     }
 
-    outSelection = tx.selectionBefore();
+    outSelections = tx.selectionsBefore();
     --m_index;
 
     emit canUndoChanged(canUndo());
@@ -86,6 +93,13 @@ bool UndoStack::undo(TextBuffer &buffer, SelectionState &outSelection) {
 }
 
 bool UndoStack::redo(TextBuffer &buffer, SelectionState &outSelection) {
+    QVector<SelectionState> sels;
+    bool ok = redo(buffer, sels);
+    outSelection = sels.isEmpty() ? SelectionState() : sels.first();
+    return ok;
+}
+
+bool UndoStack::redo(TextBuffer &buffer, QVector<SelectionState> &outSelections) {
     if (m_index >= m_commands.size()) {
         return false;
     }
@@ -101,7 +115,7 @@ bool UndoStack::redo(TextBuffer &buffer, SelectionState &outSelection) {
         buffer.replace(edit.offset, edit.oldText.length(), edit.newText);
     }
 
-    outSelection = tx.selectionAfter();
+    outSelections = tx.selectionsAfter();
     ++m_index;
 
     emit canUndoChanged(canUndo());

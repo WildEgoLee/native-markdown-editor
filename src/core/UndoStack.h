@@ -16,7 +16,9 @@ public:
 
     void push(const EditTransaction &transaction, TextBuffer &buffer);
     bool undo(TextBuffer &buffer, SelectionState &outSelection);
+    bool undo(TextBuffer &buffer, QVector<SelectionState> &outSelections);
     bool redo(TextBuffer &buffer, SelectionState &outSelection);
+    bool redo(TextBuffer &buffer, QVector<SelectionState> &outSelections);
 
     bool canUndo() const { return m_index > 0; }
     bool canRedo() const { return m_index < m_commands.size(); }

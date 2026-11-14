@@ -10,6 +10,7 @@
 #include <QtSvg/QSvgRenderer>
 #include <memory>
 #include <atomic>
+#include <functional>
 
 namespace MarkdownTool::Render {
 
@@ -58,12 +59,19 @@ public:
 
     void onRenderCompleted(const CacheKey &key, const QByteArray &svgData, quint64 generation);
 
+    // Test synchronization hook to deterministically test cross-generation race condition before lock re-entry
+    void setTestPreCommitHook(std::function<void(quint64)> hook) {
+        m_testPreCommitHook = std::move(hook);
+    }
+
 signals:
     void renderReady(MarkdownTool::Render::RenderKind kind, const QString &source);
 
 private:
     void commitToCacheLocked(const CacheKey &key, const std::shared_ptr<QSvgRenderer> &renderer, qint64 byteSize, quint64 generation);
     void evictIfNeededLocked();
+
+    std::function<void(quint64)> m_testPreCommitHook;
 
     mutable QMutex m_mutex;
     QHash<CacheKey, std::shared_ptr<QSvgRenderer>> m_rendererCache;

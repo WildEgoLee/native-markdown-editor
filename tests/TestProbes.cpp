@@ -2810,7 +2810,43 @@ void TestProbes::testSyncFallbackEpochRaceConditionAndUnifiedCache() {
     QVERIFY(!service->isPending(formulaB, Render::RenderKind::Math));
     QVERIFY(service->totalCachedBytes() > 0);
 
-    // 3. Multithreaded cross-generation concurrency race test
+    // 3. Deterministic synchronous fallback cross-generation race reproduction
+    // Hook fires right after synchronous SVG rendering completes, before the lock is re-acquired.
+    QString formulaC = QStringLiteral("$$\\gamma = \\frac{1}{1 - v^2}$$");
+    quint64 preSyncGen = service->currentGeneration();
+    bool hookFired = false;
+
+    service->setTestPreCommitHook([&service, &hookFired, preSyncGen, formulaC](quint64 hookGen) {
+        hookFired = true;
+        // Verify hook receives the generation in which sync render began
+        QCOMPARE(hookGen, preSyncGen);
+        // Interleaving action: clearCache() bumps generation!
+        service->clearCache();
+        // Submit a new pending request in this new generation for the same formula
+        service->requestRender(formulaC, Render::RenderKind::Math);
+    });
+
+    // Invoke getRenderer with synchronous fallback allowed
+    auto rC = service->getRenderer(formulaC, Render::RenderKind::Math, true);
+    // Disconnect test hook immediately
+    service->setTestPreCommitHook(nullptr);
+
+    QVERIFY(hookFired);
+    QVERIFY(rC != nullptr);
+    QVERIFY(rC->isValid());
+
+    // Deterministic assertions:
+    // a) Generation must have advanced
+    QVERIFY(service->currentGeneration() > preSyncGen);
+    // b) Stale synchronous render MUST NOT be written into the new generation cache!
+    QVERIFY(!service->isCached(formulaC, Render::RenderKind::Math));
+    // c) The new generation's pending request for formulaC MUST STILL BE ACTIVE!
+    QVERIFY(service->isPending(formulaC, Render::RenderKind::Math));
+    // d) Cached bytes must be 0 because the stale write was discarded
+    QCOMPARE(service->totalCachedBytes(), 0);
+    QCOMPARE(service->cacheCount(), 0);
+
+    // 4. Multithreaded cross-generation concurrency race test
     std::atomic<bool> stopFlag{false};
     std::atomic<int> errors{0};
     std::vector<std::thread> workers;
@@ -2872,6 +2908,10 @@ void TestProbes::testRealGuiAsyncAutoRefreshAndInteractiveRegression() {
     QVERIFY(service != nullptr);
     service->clearCache();
 
+    // Hook signal spy FIRST, before view construction or buffer loading,
+    // ensuring zero possibility of missing early async signals.
+    QSignalSpy readySpy(service, &Render::AsyncRenderService::renderReady);
+
     class PaintCounterFilter : public QObject {
     public:
         int count = 0;
@@ -2897,8 +2937,10 @@ void TestProbes::testRealGuiAsyncAutoRefreshAndInteractiveRegression() {
     int initialPaints = counter.count;
     QVERIFY(initialPaints >= 1);
 
-    // Listen for renderReady
-    QSignalSpy readySpy(service, &Render::AsyncRenderService::renderReady);
+    // Grab initial placeholder framebuffer
+    QPixmap initialPix(editorView.viewport()->size());
+    editorView.viewport()->render(&initialPix);
+    QImage initialImg = initialPix.toImage();
 
     // Wait for at least 2 renderReady signals from background threads
     int waitCycles = 0;
@@ -2911,11 +2953,43 @@ void TestProbes::testRealGuiAsyncAutoRefreshAndInteractiveRegression() {
 
     // Process event loop so viewport()->update() posts and dispatches the paint event
     QCoreApplication::processEvents();
+    QTest::qWait(50);
+    QCoreApplication::processEvents();
 
-    // Verification: Automatic refresh happened purely via Qt event loop without calling editorView.render()
+    // Verification 1: Automatic refresh happened purely via Qt event loop without calling editorView.render()
     QVERIFY2(counter.count > initialPaints,
              qPrintable(QString("Paint count (%1) must be greater than initial (%2)")
                  .arg(counter.count).arg(initialPaints)));
+
+    // Verification 2: Rendered framebuffer content changed from placeholder to SVG!
+    QPixmap updatedPix(editorView.viewport()->size());
+    editorView.viewport()->render(&updatedPix);
+    QImage updatedImg = updatedPix.toImage();
+
+    int diffPixels = 0;
+    int w = std::min(initialImg.width(), updatedImg.width());
+    int h = std::min(initialImg.height(), updatedImg.height());
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            if (initialImg.pixel(x, y) != updatedImg.pixel(x, y)) {
+                diffPixels++;
+            }
+        }
+    }
+    QVERIFY2(diffPixels > 100, qPrintable(QString("diffPixels (%1) must be > 100 to prove visual update").arg(diffPixels)));
+
+    // Verification 3: Confirm presence of SVG dark glyph and graphic pixels in the updated framebuffer
+    int svgColorPixels = 0;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            QRgb p = updatedImg.pixel(x, y);
+            // Math formula dark text or Mermaid primary blue strokes
+            if (qRed(p) < 40 && qGreen(p) < 50 && qBlue(p) < 70) {
+                svgColorPixels++;
+            }
+        }
+    }
+    QVERIFY2(svgColorPixels > 100, qPrintable(QString("svgColorPixels (%1) must be > 100 to confirm SVG rendering").arg(svgColorPixels)));
 
     // Verify cache items are populated
     const auto &proj = editorView.projection();

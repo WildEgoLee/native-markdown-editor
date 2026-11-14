@@ -216,6 +216,9 @@ std::shared_ptr<QSvgRenderer> AsyncRenderService::getRenderer(const QString &sou
         QByteArray svg = (kind == RenderKind::Math) ? MathSvgRenderer::renderToSvg(source)
                                                     : MermaidSvgRenderer::renderToSvg(source);
         auto renderer = std::make_shared<QSvgRenderer>(svg);
+        if (m_testPreCommitHook) {
+            m_testPreCommitHook(startGen);
+        }
         {
             QMutexLocker locker(&m_mutex);
             if (!m_isShuttingDown.load()) {

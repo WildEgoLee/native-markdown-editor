@@ -8,6 +8,8 @@
 #include <QPainter>
 #include <QObject>
 
+class QSettings;
+
 namespace MarkdownTool::Theme {
 
 enum class ThemeMode {
@@ -54,6 +56,9 @@ public:
     ThemeMode currentMode() const { return m_mode; }
     void setMode(ThemeMode mode);
     void toggleMode();
+
+    void loadSettings(QSettings *settings = nullptr);
+    void saveSettings(QSettings *settings = nullptr);
 
     const ColorPalette &palette() const { return m_palette; }
 

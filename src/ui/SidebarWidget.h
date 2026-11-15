@@ -6,6 +6,7 @@
 #include <QStackedWidget>
 #include <QTreeView>
 #include <QFileSystemModel>
+#include <QSortFilterProxyModel>
 #include <QPushButton>
 #include <QLineEdit>
 #include <QFrame>
@@ -20,6 +21,12 @@ public:
 
     OutlineWidget *outlineWidget() { return m_outlineWidget; }
     void setWorkspacePath(const QString &path);
+
+    QTreeView *fileTree() const { return m_fileTree; }
+    QFileSystemModel *fileModel() const { return m_fileModel; }
+    QSortFilterProxyModel *fileProxyModel() const { return m_fileProxyModel; }
+    QLineEdit *searchEdit() const { return m_searchEdit; }
+    QString fileFilterPattern() const;
 
 signals:
     void fileSelected(const QString &filePath);
@@ -40,6 +47,7 @@ private:
     OutlineWidget *m_outlineWidget = nullptr;
     QTreeView *m_fileTree = nullptr;
     QFileSystemModel *m_fileModel = nullptr;
+    QSortFilterProxyModel *m_fileProxyModel = nullptr;
 };
 
 } // namespace MarkdownTool::UI

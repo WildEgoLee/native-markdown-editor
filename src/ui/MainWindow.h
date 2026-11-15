@@ -13,6 +13,8 @@
 #include <QDropEvent>
 #include <QMimeData>
 
+class QSettings;
+
 namespace MarkdownTool::UI {
 
 class FindReplaceBar;
@@ -28,8 +30,12 @@ public:
     bool saveFile();
     bool saveFileAs();
 
+    void loadPreferences(QSettings *settings = nullptr);
+    void savePreferences(QSettings *settings = nullptr);
+
     Editor::NativeEditorView *editorView() const { return m_editorView; }
     SidebarWidget *sidebar() const { return m_sidebar; }
+    FindReplaceBar *findBar() const { return m_findBar; }
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -80,6 +86,12 @@ private:
 
     void updateThemeStyles();
     void showFontDialog();
+    void updateFindMatches();
+    void updateTypographyMenu();
+
+    QAction *m_actSans = nullptr;
+    QAction *m_actSerif = nullptr;
+    QAction *m_actMono = nullptr;
 };
 
 } // namespace MarkdownTool::UI

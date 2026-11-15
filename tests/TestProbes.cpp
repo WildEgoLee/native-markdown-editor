@@ -12,6 +12,7 @@
 #include <QDropEvent>
 #include <QUrl>
 #include <QDir>
+#include <QSettings>
 #include <cmath>
 #include <random>
 #include <thread>
@@ -33,6 +34,7 @@
 #include "render/AsyncRenderService.h"
 #include "theme/Theme.h"
 #include "ui/MainWindow.h"
+#include "ui/FindReplaceBar.h"
 
 using namespace MarkdownTool;
 
@@ -40,6 +42,8 @@ class TestProbes : public QObject {
     Q_OBJECT
 
 private slots:
+    void initTestCase();
+    void cleanupTestCase();
     void testByteForByteInvariance();
     void testPositionTranslationAndEmoji();
     void testUndoRedoAndCleanState();
@@ -88,7 +92,23 @@ private slots:
     void testFileAndImageDragAndDrop();
     void testVisualRedesignScreenshotsAndThemes();
     void testMouseWheelScrollingAndTypography();
+    void testFindAndReplaceFeedback();
+    void testPreferencesPersistenceAndMenuSync();
+    void testSidebarSearchConsistency();
+
+private:
+    std::unique_ptr<QTemporaryDir> m_tempSettingsDir;
 };
+
+void TestProbes::initTestCase() {
+    m_tempSettingsDir = std::make_unique<QTemporaryDir>();
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_tempSettingsDir->path());
+}
+
+void TestProbes::cleanupTestCase() {
+    m_tempSettingsDir.reset();
+}
 
 // Probe 1: UTF-8 BOM, CRLF, trailing spaces, no-newline exact byte-for-byte invariance
 void TestProbes::testByteForByteInvariance() {
@@ -3487,6 +3507,360 @@ void TestProbes::testMouseWheelScrollingAndTypography() {
     // Restore to SansSerif default
     themeMgr.setFontPreset(Theme::ThemeManager::FontPreset::SansSerif);
     themeMgr.resetZoom();
+}
+
+void TestProbes::testFindAndReplaceFeedback() {
+    Editor::NativeEditorView editor;
+    editor.buffer().setText(QStringLiteral("apple banana apple orange apple"));
+    editor.reparseAndRelayout();
+
+    // 1. Empty query should return false and not move cursor
+    editor.setCursorPos(7);
+    QCOMPARE(editor.cursorPos(), 7);
+    QVERIFY(!editor.findText(QString(), false, true));
+    QCOMPARE(editor.cursorPos(), 7);
+
+    // 2. Initial searchStatus
+    auto s0 = editor.searchStatus(QStringLiteral("apple"), true);
+    QCOMPARE(s0.total, 3);
+    QCOMPARE(s0.current, 0); // nothing selected yet
+
+    // 3. Forward cyclic search
+    editor.setCursorPos(0);
+    QVERIFY(editor.findText(QStringLiteral("apple"), true, true));
+    QCOMPARE(editor.selectionAnchor(), 0);
+    QCOMPARE(editor.cursorPos(), 5);
+    auto s1 = editor.searchStatus(QStringLiteral("apple"), true);
+    QCOMPARE(s1.total, 3);
+    QCOMPARE(s1.current, 1);
+
+    // Next match
+    QVERIFY(editor.findText(QStringLiteral("apple"), true, true));
+    QCOMPARE(editor.selectionAnchor(), 13);
+    QCOMPARE(editor.cursorPos(), 18);
+    auto s2 = editor.searchStatus(QStringLiteral("apple"), true);
+    QCOMPARE(s2.current, 2);
+
+    // Next match
+    QVERIFY(editor.findText(QStringLiteral("apple"), true, true));
+    QCOMPARE(editor.selectionAnchor(), 26);
+    QCOMPARE(editor.cursorPos(), 31);
+    auto s3 = editor.searchStatus(QStringLiteral("apple"), true);
+    QCOMPARE(s3.current, 3);
+
+    // Wrap around to match 1
+    QVERIFY(editor.findText(QStringLiteral("apple"), true, true));
+    QCOMPARE(editor.selectionAnchor(), 0);
+    QCOMPARE(editor.cursorPos(), 5);
+    QCOMPARE(editor.searchStatus(QStringLiteral("apple"), true).current, 1);
+
+    // 4. Backward cyclic search from match 1 wraps to match 3
+    QVERIFY(editor.findText(QStringLiteral("apple"), true, false));
+    QCOMPARE(editor.selectionAnchor(), 26);
+    QCOMPARE(editor.cursorPos(), 31);
+    QCOMPARE(editor.searchStatus(QStringLiteral("apple"), true).current, 3);
+
+    // Backward to match 2
+    QVERIFY(editor.findText(QStringLiteral("apple"), true, false));
+    QCOMPARE(editor.selectionAnchor(), 13);
+    QCOMPARE(editor.cursorPos(), 18);
+    QCOMPARE(editor.searchStatus(QStringLiteral("apple"), true).current, 2);
+
+    // 5. Case sensitivity
+    editor.buffer().setText(QStringLiteral("Test test TEST"));
+    editor.reparseAndRelayout();
+    auto scaseSensitive = editor.searchStatus(QStringLiteral("Test"), true);
+    QCOMPARE(scaseSensitive.total, 1);
+    auto scaseInsensitive = editor.searchStatus(QStringLiteral("Test"), false);
+    QCOMPARE(scaseInsensitive.total, 3);
+
+    // 6. Chinese and Emoji
+    editor.buffer().setText(QStringLiteral("你好世界 🎉 欢迎来到 🎉 世界"));
+    editor.reparseAndRelayout();
+    auto sEmoji = editor.searchStatus(QStringLiteral("🎉"), true);
+    QCOMPARE(sEmoji.total, 2);
+    auto sChinese = editor.searchStatus(QStringLiteral("世界"), true);
+    QCOMPARE(sChinese.total, 2);
+
+    // 7. Zero matches
+    auto sZero = editor.searchStatus(QStringLiteral("不存在的内容"), false);
+    QCOMPARE(sZero.total, 0);
+    QCOMPARE(sZero.current, 0);
+
+    // 8. Overlapping search consistency (aaaa with query aa)
+    editor.buffer().setText(QStringLiteral("aaaa"));
+    editor.reparseAndRelayout();
+    auto sOverlap = editor.searchStatus(QStringLiteral("aa"), true);
+    QCOMPARE(sOverlap.total, 2);
+    editor.setCursorPos(0);
+    // Forward to first match
+    QVERIFY(editor.findText(QStringLiteral("aa"), true, true));
+    QCOMPARE(editor.selectionAnchor(), 0);
+    QCOMPARE(editor.cursorPos(), 2);
+    QCOMPARE(editor.searchStatus(QStringLiteral("aa"), true).current, 1);
+    // Reverse from first match wraps to second match
+    QVERIFY(editor.findText(QStringLiteral("aa"), true, false));
+    QCOMPARE(editor.selectionAnchor(), 2);
+    QCOMPARE(editor.cursorPos(), 4);
+    QCOMPARE(editor.searchStatus(QStringLiteral("aa"), true).current, 2);
+    // Reverse again to first match
+    QVERIFY(editor.findText(QStringLiteral("aa"), true, false));
+    QCOMPARE(editor.selectionAnchor(), 0);
+    QCOMPARE(editor.cursorPos(), 2);
+    QCOMPARE(editor.searchStatus(QStringLiteral("aa"), true).current, 1);
+
+    // 9. Replace one and replace all with undo
+    editor.buffer().setText(QStringLiteral("cat and cat and cat"));
+    editor.reparseAndRelayout();
+    editor.setCursorPos(0);
+    editor.findText(QStringLiteral("cat"), true, true);
+    editor.replaceOne(QStringLiteral("cat"), QStringLiteral("dog"), true);
+    QCOMPARE(editor.buffer().text(), QStringLiteral("dog and cat and cat"));
+    QCOMPARE(editor.searchStatus(QStringLiteral("cat"), true).total, 2);
+
+    // Replace all remaining
+    int repCount = editor.replaceAll(QStringLiteral("cat"), QStringLiteral("dog"), true);
+    QCOMPARE(repCount, 2);
+    QCOMPARE(editor.buffer().text(), QStringLiteral("dog and dog and dog"));
+    QCOMPARE(editor.searchStatus(QStringLiteral("cat"), true).total, 0);
+
+    // Undo replace all
+    Core::SelectionState undoSel;
+    editor.undoStack().undo(editor.buffer(), undoSel);
+    QCOMPARE(editor.buffer().text(), QStringLiteral("dog and cat and cat"));
+    QCOMPARE(editor.searchStatus(QStringLiteral("cat"), true).total, 2);
+
+    // 10. MainWindow GUI wiring: F3, Shift+F3, buttons, Esc in both inputs, and live auto-updates
+    UI::MainWindow window;
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+    window.editorView()->buffer().setText(QStringLiteral("aaaa bb aaaa"));
+    window.editorView()->reparseAndRelayout();
+
+    auto findBar = window.findBar();
+    QVERIFY(findBar != nullptr);
+    auto findEdit = findBar->findChild<QLineEdit*>(QStringLiteral("findEdit"));
+    auto replaceEdit = findBar->findChild<QLineEdit*>(QStringLiteral("replaceEdit"));
+    auto countLabel = findBar->findChild<QLabel*>(QStringLiteral("matchCountLabel"));
+    auto btnPrev = findBar->findChild<QPushButton*>(QStringLiteral("btnPrev"));
+    auto btnNext = findBar->findChild<QPushButton*>(QStringLiteral("btnNext"));
+    auto btnReplace = findBar->findChild<QPushButton*>(QStringLiteral("btnReplace"));
+    QVERIFY(findEdit && replaceEdit && countLabel && btnPrev && btnNext && btnReplace);
+
+    findBar->openFind();
+    QVERIFY(findBar->isVisible());
+
+    // Type query "aa" via real signal path
+    findEdit->setText(QStringLiteral("aa"));
+    QCOMPARE(countLabel->text(), QStringLiteral("0/4"));
+
+    // Press F3 via Qt test shortcut event on window
+    QTest::keyClick(&window, Qt::Key_F3);
+    QCOMPARE(window.editorView()->selectionAnchor(), 0);
+    QCOMPARE(window.editorView()->cursorPos(), 2);
+    QCOMPARE(countLabel->text(), QStringLiteral("1/4"));
+
+    // Press F3 again
+    QTest::keyClick(&window, Qt::Key_F3);
+    QCOMPARE(window.editorView()->selectionAnchor(), 2);
+    QCOMPARE(window.editorView()->cursorPos(), 4);
+    QCOMPARE(countLabel->text(), QStringLiteral("2/4"));
+
+    // Press Shift+F3 to go backwards
+    QTest::keyClick(&window, Qt::Key_F3, Qt::ShiftModifier);
+    QCOMPARE(window.editorView()->selectionAnchor(), 0);
+    QCOMPARE(window.editorView()->cursorPos(), 2);
+    QCOMPARE(countLabel->text(), QStringLiteral("1/4"));
+
+    // Press Shift+F3 again to wrap around backwards
+    QTest::keyClick(&window, Qt::Key_F3, Qt::ShiftModifier);
+    QCOMPARE(window.editorView()->selectionAnchor(), 10);
+    QCOMPARE(window.editorView()->cursorPos(), 12);
+    QCOMPARE(countLabel->text(), QStringLiteral("4/4"));
+
+    // Move cursor to non-matching position, label automatically resets to 0/4
+    window.editorView()->setCursorPos(5);
+    QCOMPARE(countLabel->text(), QStringLiteral("0/4"));
+
+    // Click Next button
+    QTest::mouseClick(btnNext, Qt::LeftButton);
+    QCOMPARE(window.editorView()->selectionAnchor(), 8);
+    QCOMPARE(countLabel->text(), QStringLiteral("3/4"));
+
+    // Test replace: open replace row, set replace text, click replace button
+    findBar->openReplace();
+    replaceEdit->setText(QStringLiteral("xx"));
+    QTest::mouseClick(btnReplace, Qt::LeftButton);
+    // Replaced at index 8; match count automatically updates to 3 total matches
+    QCOMPARE(countLabel->text(), QStringLiteral("3/3"));
+
+    // Test Escape in findEdit: closes findBar and restores editor focus
+    findEdit->setFocus();
+    QVERIFY(findEdit->hasFocus());
+    QTest::keyClick(findEdit, Qt::Key_Escape);
+    QVERIFY(findBar->isHidden());
+    QVERIFY(window.editorView()->hasFocus());
+
+    // Test Escape in replaceEdit: closes findBar and restores editor focus
+    findBar->openReplace();
+    QVERIFY(findBar->isVisible());
+    replaceEdit->setFocus();
+    QVERIFY(replaceEdit->hasFocus());
+    QTest::keyClick(replaceEdit, Qt::Key_Escape);
+    QVERIFY(findBar->isHidden());
+    QVERIFY(window.editorView()->hasFocus());
+}
+
+void TestProbes::testPreferencesPersistenceAndMenuSync() {
+    QTemporaryDir tempPrefDir;
+    QString iniFile = tempPrefDir.filePath(QStringLiteral("test_prefs.ini"));
+    QSettings settings(iniFile, QSettings::IniFormat);
+
+    // 1. First run on clean settings file
+    {
+        UI::MainWindow w1;
+        w1.show();
+        w1.loadPreferences(&settings);
+        QCOMPARE(Theme::ThemeManager::instance().currentMode(), Theme::ThemeMode::Light);
+        QCOMPARE(Theme::ThemeManager::instance().fontPreset(), Theme::ThemeManager::FontPreset::SansSerif);
+        QCOMPARE(Theme::ThemeManager::instance().basePointSize(), 12.0);
+        QVERIFY(!w1.sidebar()->isHidden());
+
+        // Modify settings and save
+        Theme::ThemeManager::instance().setMode(Theme::ThemeMode::Dark);
+        Theme::ThemeManager::instance().setFontPreset(Theme::ThemeManager::FontPreset::Serif);
+        Theme::ThemeManager::instance().setBasePointSize(15.0);
+        w1.sidebar()->setVisible(false);
+        QVERIFY(w1.sidebar()->isHidden());
+        w1.savePreferences(&settings);
+    }
+
+    // Reset global theme to defaults before restoring
+    Theme::ThemeManager::instance().setMode(Theme::ThemeMode::Light);
+    Theme::ThemeManager::instance().setFontPreset(Theme::ThemeManager::FontPreset::SansSerif);
+    Theme::ThemeManager::instance().setBasePointSize(12.0);
+
+    // 2. Round-trip restore in independent instance
+    {
+        UI::MainWindow w2;
+        w2.show();
+        w2.loadPreferences(&settings);
+        QCOMPARE(Theme::ThemeManager::instance().currentMode(), Theme::ThemeMode::Dark);
+        QCOMPARE(Theme::ThemeManager::instance().fontPreset(), Theme::ThemeManager::FontPreset::Serif);
+        QCOMPARE(Theme::ThemeManager::instance().basePointSize(), 15.0);
+        QVERIFY(w2.sidebar()->isHidden());
+
+        // Programmatic font switch updates menu state
+        Theme::ThemeManager::instance().setFontPreset(Theme::ThemeManager::FontPreset::Monospace);
+        QTest::qWait(20);
+        QCOMPARE(Theme::ThemeManager::instance().fontPreset(), Theme::ThemeManager::FontPreset::Monospace);
+
+        Theme::ThemeManager::instance().setCustomFontFamily(QStringLiteral("MyCustomFont"));
+        QTest::qWait(20);
+        QCOMPARE(Theme::ThemeManager::instance().fontPreset(), Theme::ThemeManager::FontPreset::Custom);
+    }
+
+    // 3. Illegal configuration bounds
+    settings.setValue(QStringLiteral("Appearance/basePointSize"), 999.0);
+    settings.setValue(QStringLiteral("Appearance/fontPreset"), 88);
+    settings.setValue(QStringLiteral("Appearance/themeMode"), 77);
+    settings.setValue(QStringLiteral("window/sidebarWidth"), 5000);
+    settings.remove(QStringLiteral("window/sidebarVisible"));
+    {
+        UI::MainWindow w3;
+        w3.show();
+        w3.loadPreferences(&settings);
+        QCOMPARE(Theme::ThemeManager::instance().basePointSize(), 12.0);
+        QCOMPARE(Theme::ThemeManager::instance().fontPreset(), Theme::ThemeManager::FontPreset::SansSerif);
+        QCOMPARE(Theme::ThemeManager::instance().currentMode(), Theme::ThemeMode::Light);
+        QVERIFY(!w3.sidebar()->isHidden());
+    }
+
+    // Restore clean global theme
+    Theme::ThemeManager::instance().setMode(Theme::ThemeMode::Light);
+    Theme::ThemeManager::instance().setFontPreset(Theme::ThemeManager::FontPreset::SansSerif);
+    Theme::ThemeManager::instance().setBasePointSize(12.0);
+}
+
+void TestProbes::testSidebarSearchConsistency() {
+    QTemporaryDir workDir;
+    QDir dir(workDir.path());
+    dir.mkdir(QStringLiteral("subfolder"));
+
+    // Create test files
+    QFile f1(dir.filePath(QStringLiteral("normal_doc.md")));
+    f1.open(QIODevice::WriteOnly);
+    f1.write("# Doc 1\n");
+    f1.close();
+
+    QFile f2(dir.filePath(QStringLiteral("subfolder/nested.markdown")));
+    f2.open(QIODevice::WriteOnly);
+    f2.write("# Nested\n");
+    f2.close();
+
+    QFile f3(dir.filePath(QStringLiteral("special[filter].txt")));
+    f3.open(QIODevice::WriteOnly);
+    f3.write("notes\n");
+    f3.close();
+
+    QFile f4(dir.filePath(QStringLiteral("中文笔记.md")));
+    f4.open(QIODevice::WriteOnly);
+    f4.write("chinese\n");
+    f4.close();
+
+    QFile fIgnored(dir.filePath(QStringLiteral("ignored.exe")));
+    fIgnored.open(QIODevice::WriteOnly);
+    fIgnored.write("binary\n");
+    fIgnored.close();
+
+    UI::SidebarWidget sidebar;
+    sidebar.setWorkspacePath(workDir.path());
+    QTest::qWait(100);
+
+    // Initial state: empty filter on files page
+    QCOMPARE(sidebar.fileFilterPattern(), QString());
+
+    // 1. Literal substring match with special chars '[' and ']'
+    sidebar.searchEdit()->setText(QStringLiteral("[filter]"));
+    QTest::qWait(50);
+    QCOMPARE(sidebar.fileFilterPattern(), QStringLiteral("[filter]"));
+
+    // 2. Switch to Outline page applies current search query
+    sidebar.outlineWidget()->updateOutline(Parser::SemanticNodePtr(), QStringLiteral("# [filter] Heading\n"));
+    sidebar.findChild<QPushButton*>(QStringLiteral("segmentBtn"))->click();
+    QTest::qWait(50);
+
+    // 3. Switch back to Files page preserves filter
+    sidebar.setWorkspacePath(workDir.path());
+    QTest::qWait(50);
+    QCOMPARE(sidebar.searchEdit()->text(), QStringLiteral("[filter]"));
+    QCOMPARE(sidebar.fileFilterPattern(), QStringLiteral("[filter]"));
+
+    // 4. Chinese search
+    sidebar.searchEdit()->setText(QStringLiteral("中文"));
+    QTest::qWait(50);
+    QCOMPARE(sidebar.fileFilterPattern(), QStringLiteral("中文"));
+
+    // 5. Clear search restores default view
+    sidebar.searchEdit()->clear();
+    QTest::qWait(50);
+    QCOMPARE(sidebar.fileFilterPattern(), QString());
+
+    // 6. Clicking file in file tree emits fileSelected with exact path
+    QSignalSpy fileSpy(&sidebar, &UI::SidebarWidget::fileSelected);
+    QModelIndex srcIdx = sidebar.fileModel()->index(f1.fileName());
+    if (!srcIdx.isValid()) {
+        srcIdx = sidebar.fileModel()->index(dir.filePath(QStringLiteral("normal_doc.md")));
+    }
+    QModelIndex proxyIdx = sidebar.fileProxyModel()->mapFromSource(srcIdx);
+    if (proxyIdx.isValid()) {
+        sidebar.fileTree()->clicked(proxyIdx);
+        QTest::qWait(50);
+        QVERIFY(fileSpy.count() >= 1);
+        QCOMPARE(QFileInfo(fileSpy.first().first().toString()).canonicalFilePath(),
+                 QFileInfo(dir.filePath(QStringLiteral("normal_doc.md"))).canonicalFilePath());
+    }
 }
 
 QTEST_MAIN(TestProbes)

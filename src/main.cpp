@@ -77,6 +77,7 @@ int main(int argc, char *argv[]) {
     app.setFont(defaultFont);
 
     auto window = std::make_unique<MarkdownTool::UI::MainWindow>();
+    window->loadPreferences();
     window->show();
 
     if (!fileToOpen.isEmpty()) {

@@ -74,7 +74,13 @@ public:
     void undo();
     void redo();
 
+    struct SearchMatchStatus {
+        int current = 0;
+        int total = 0;
+    };
+
     bool findText(const QString &text, bool matchCase, bool forward);
+    SearchMatchStatus searchStatus(const QString &text, bool matchCase) const;
     bool replaceOne(const QString &findStr, const QString &replaceStr, bool matchCase);
     int replaceAll(const QString &findStr, const QString &replaceStr, bool matchCase);
 
@@ -146,6 +152,15 @@ private:
 
     bool m_isMouseSelecting = false;
     UI::SlashCommandPopup *m_slashPopup = nullptr;
+
+    struct FindCache {
+        quint64 bufferRevision = 0;
+        QString query;
+        bool matchCase = false;
+        QVector<int> matches;
+    };
+    mutable FindCache m_findCache;
+    const QVector<int> &ensureFindMatches(const QString &text, bool matchCase) const;
 
     quint64 m_incrementalParseHits = 0;
     quint64 m_fullParseFallbacks = 0;

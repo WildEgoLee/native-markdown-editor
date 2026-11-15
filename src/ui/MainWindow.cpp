@@ -13,6 +13,7 @@
 #include <QComboBox>
 #include <QToolButton>
 #include <QActionGroup>
+#include <QSettings>
 #include <QVBoxLayout>
 
 namespace MarkdownTool::UI {
@@ -67,15 +68,22 @@ void MainWindow::setupUi() {
     // Find and Replace wiring
     connect(m_findBar, &FindReplaceBar::findNext, this, [this](const QString &t, bool mc) {
         m_editorView->findText(t, mc, true);
+        updateFindMatches();
     });
     connect(m_findBar, &FindReplaceBar::findPrev, this, [this](const QString &t, bool mc) {
         m_editorView->findText(t, mc, false);
+        updateFindMatches();
     });
     connect(m_findBar, &FindReplaceBar::replaceOne, this, [this](const QString &f, const QString &r, bool mc) {
         m_editorView->replaceOne(f, r, mc);
+        updateFindMatches();
     });
     connect(m_findBar, &FindReplaceBar::replaceAll, this, [this](const QString &f, const QString &r, bool mc) {
         m_editorView->replaceAll(f, r, mc);
+        updateFindMatches();
+    });
+    connect(m_findBar, &FindReplaceBar::findParamsChanged, this, [this](const QString &, bool) {
+        updateFindMatches();
     });
     connect(m_findBar, &FindReplaceBar::closed, this, [this]() {
         m_editorView->setFocus();
@@ -93,6 +101,9 @@ void MainWindow::setupUi() {
 
     connect(m_editorView, &Editor::NativeEditorView::textChanged, this, [this]() {
         m_outlineDebounceTimer->start();
+        if (m_findBar && m_findBar->isVisible()) {
+            updateFindMatches();
+        }
     });
 
     connect(m_sidebar->outlineWidget(), &OutlineWidget::headingClicked, this, [this](int offset) {
@@ -119,6 +130,11 @@ void MainWindow::setupUi() {
     setAcceptDrops(true);
 
     connect(m_editorView, &Editor::NativeEditorView::cursorMoved, this, &MainWindow::updateStatusBar);
+    connect(m_editorView, &Editor::NativeEditorView::cursorMoved, this, [this](int, int, int) {
+        if (m_findBar && m_findBar->isVisible()) {
+            updateFindMatches();
+        }
+    });
     connect(&m_editorView->undoStack(), &Core::UndoStack::cleanStateChanged, this, &MainWindow::onCleanStateChanged);
     connect(m_editorView, &Editor::NativeEditorView::modeChanged, this, [this](bool isSource) {
         m_statusModeLabel->setText(isSource ? QStringLiteral("源码模式") : QStringLiteral("即时预览"));
@@ -163,14 +179,28 @@ void MainWindow::setupMenusAndToolbars() {
     editMenu->addAction(QStringLiteral("粘贴 (&P)"), QKeySequence::Paste, m_editorView, &Editor::NativeEditorView::paste);
     editMenu->addAction(QStringLiteral("全选 (&A)"), QKeySequence::SelectAll, m_editorView, &Editor::NativeEditorView::selectAll);
     editMenu->addSeparator();
-    editMenu->addAction(QStringLiteral("查找 (&F)..."), QKeySequence::Find, m_findBar, &FindReplaceBar::openFind);
-    editMenu->addAction(QStringLiteral("替换 (&H)..."), QKeySequence(QStringLiteral("Ctrl+H")), m_findBar, &FindReplaceBar::openReplace);
+    editMenu->addAction(QStringLiteral("查找 (&F)..."), QKeySequence::Find, [this]() {
+        m_findBar->openFind();
+        updateFindMatches();
+    });
+    editMenu->addAction(QStringLiteral("替换 (&H)..."), QKeySequence(QStringLiteral("Ctrl+H")), [this]() {
+        m_findBar->openReplace();
+        updateFindMatches();
+    });
     editMenu->addAction(QStringLiteral("查找下一个"), QKeySequence(QKeySequence::FindNext), [this]() {
         // Find next shortcut F3
-        emit m_findBar->findNext(QString(), false);
+        const QString text = m_findBar->findText();
+        if (!text.isEmpty()) {
+            m_editorView->findText(text, m_findBar->matchCase(), true);
+            updateFindMatches();
+        }
     });
     editMenu->addAction(QStringLiteral("查找上一个"), QKeySequence(QKeySequence::FindPrevious), [this]() {
-        emit m_findBar->findPrev(QString(), false);
+        const QString text = m_findBar->findText();
+        if (!text.isEmpty()) {
+            m_editorView->findText(text, m_findBar->matchCase(), false);
+            updateFindMatches();
+        }
     });
 
     // Format Menu
@@ -213,29 +243,29 @@ void MainWindow::setupMenusAndToolbars() {
     QMenu *fontMenu = mb->addMenu(QStringLiteral("字体 (&T)"));
     auto *fontGroup = new QActionGroup(this);
 
-    auto *actSans = fontMenu->addAction(QStringLiteral("现代无衬线 (微软雅黑 / YaHei UI)"));
-    actSans->setCheckable(true);
-    actSans->setChecked(Theme::ThemeManager::instance().fontPreset() == Theme::ThemeManager::FontPreset::SansSerif);
-    fontGroup->addAction(actSans);
-    connect(actSans, &QAction::triggered, []() {
+    m_actSans = fontMenu->addAction(QStringLiteral("现代无衬线 (微软雅黑 / YaHei UI)"));
+    m_actSans->setCheckable(true);
+    fontGroup->addAction(m_actSans);
+    connect(m_actSans, &QAction::triggered, []() {
         Theme::ThemeManager::instance().setFontPreset(Theme::ThemeManager::FontPreset::SansSerif);
     });
 
-    auto *actSerif = fontMenu->addAction(QStringLiteral("典雅书卷体 (宋体 / Noto Serif)"));
-    actSerif->setCheckable(true);
-    actSerif->setChecked(Theme::ThemeManager::instance().fontPreset() == Theme::ThemeManager::FontPreset::Serif);
-    fontGroup->addAction(actSerif);
-    connect(actSerif, &QAction::triggered, []() {
+    m_actSerif = fontMenu->addAction(QStringLiteral("典雅书卷体 (宋体 / Noto Serif)"));
+    m_actSerif->setCheckable(true);
+    fontGroup->addAction(m_actSerif);
+    connect(m_actSerif, &QAction::triggered, []() {
         Theme::ThemeManager::instance().setFontPreset(Theme::ThemeManager::FontPreset::Serif);
     });
 
-    auto *actMono = fontMenu->addAction(QStringLiteral("极客等宽体 (Cascadia Code / Consolas)"));
-    actMono->setCheckable(true);
-    actMono->setChecked(Theme::ThemeManager::instance().fontPreset() == Theme::ThemeManager::FontPreset::Monospace);
-    fontGroup->addAction(actMono);
-    connect(actMono, &QAction::triggered, []() {
+    m_actMono = fontMenu->addAction(QStringLiteral("极客等宽体 (Cascadia Code / Consolas)"));
+    m_actMono->setCheckable(true);
+    fontGroup->addAction(m_actMono);
+    connect(m_actMono, &QAction::triggered, []() {
         Theme::ThemeManager::instance().setFontPreset(Theme::ThemeManager::FontPreset::Monospace);
     });
+
+    connect(&Theme::ThemeManager::instance(), &Theme::ThemeManager::typographyChanged, this, &MainWindow::updateTypographyMenu);
+    updateTypographyMenu();
 
     fontMenu->addSeparator();
 
@@ -303,7 +333,10 @@ void MainWindow::setupMenusAndToolbars() {
 
     m_tbFind = tb->addAction(Theme::ThemeManager::instance().icon(QStringLiteral("find"), 18), QStringLiteral("查找与替换 (Ctrl+F)"));
     m_tbFind->setToolTip(QStringLiteral("查找与替换 (Ctrl+F)"));
-    connect(m_tbFind, &QAction::triggered, m_findBar, &FindReplaceBar::openFind);
+    connect(m_tbFind, &QAction::triggered, [this]() {
+        m_findBar->openFind();
+        updateFindMatches();
+    });
 
     // Spacer to right-align theme & mode actions
     auto spacer = new QWidget(this);
@@ -536,6 +569,7 @@ bool MainWindow::maybeSave() {
 
 void MainWindow::closeEvent(QCloseEvent *event) {
     if (maybeSave()) {
+        savePreferences();
         if (!m_session.isUntitled()) {
             File::FileService::removeRecoverySnapshot(m_session.filePath());
         }
@@ -581,6 +615,69 @@ void MainWindow::dropEvent(QDropEvent *event) {
         }
     }
     event->ignore();
+}
+
+void MainWindow::updateFindMatches() {
+    if (!m_findBar || !m_editorView) {
+        return;
+    }
+    const QString query = m_findBar->findText();
+    if (query.isEmpty()) {
+        m_findBar->setMatchStatus(0, 0);
+        return;
+    }
+    auto status = m_editorView->searchStatus(query, m_findBar->matchCase());
+    m_findBar->setMatchStatus(status.current, status.total);
+}
+
+void MainWindow::updateTypographyMenu() {
+    auto preset = Theme::ThemeManager::instance().fontPreset();
+    if (m_actSans) m_actSans->setChecked(preset == Theme::ThemeManager::FontPreset::SansSerif);
+    if (m_actSerif) m_actSerif->setChecked(preset == Theme::ThemeManager::FontPreset::Serif);
+    if (m_actMono) m_actMono->setChecked(preset == Theme::ThemeManager::FontPreset::Monospace);
+}
+
+void MainWindow::loadPreferences(QSettings *settings) {
+    auto applyFromSettings = [this](QSettings &s) {
+        Theme::ThemeManager::instance().loadSettings(&s);
+
+        QByteArray geo = s.value(QStringLiteral("window/geometry")).toByteArray();
+        if (!geo.isEmpty()) {
+            restoreGeometry(geo);
+        }
+
+        bool sidebarVisible = s.value(QStringLiteral("window/sidebarVisible"), true).toBool();
+        m_sidebar->setVisible(sidebarVisible);
+
+        int sidebarWidth = s.value(QStringLiteral("window/sidebarWidth"), 240).toInt();
+        sidebarWidth = std::clamp(sidebarWidth, 100, 800);
+        m_splitter->setSizes({sidebarWidth, qMax(200, width() - sidebarWidth)});
+
+        updateTypographyMenu();
+    };
+
+    if (settings) {
+        applyFromSettings(*settings);
+    } else {
+        QSettings s;
+        applyFromSettings(s);
+    }
+}
+
+void MainWindow::savePreferences(QSettings *settings) {
+    auto writeToSettings = [this](QSettings &s) {
+        Theme::ThemeManager::instance().saveSettings(&s);
+        s.setValue(QStringLiteral("window/geometry"), saveGeometry());
+        s.setValue(QStringLiteral("window/sidebarVisible"), m_sidebar->isVisible());
+        s.setValue(QStringLiteral("window/sidebarWidth"), m_splitter->sizes().value(0, 240));
+    };
+
+    if (settings) {
+        writeToSettings(*settings);
+    } else {
+        QSettings s;
+        writeToSettings(s);
+    }
 }
 
 } // namespace MarkdownTool::UI

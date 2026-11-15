@@ -2,6 +2,7 @@
 #include <QtSvg/QSvgRenderer>
 #include <QPainter>
 #include <QApplication>
+#include <QSettings>
 
 namespace MarkdownTool::Theme {
 
@@ -24,6 +25,58 @@ void ThemeManager::setMode(ThemeMode mode) {
 
 void ThemeManager::toggleMode() {
     setMode(m_mode == ThemeMode::Light ? ThemeMode::Dark : ThemeMode::Light);
+}
+
+void ThemeManager::loadSettings(QSettings *settings) {
+    auto readFromSettings = [this](QSettings &s) {
+        int modeVal = s.value(QStringLiteral("Appearance/themeMode"), static_cast<int>(ThemeMode::Light)).toInt();
+        ThemeMode newMode = (modeVal == 1) ? ThemeMode::Dark : ThemeMode::Light;
+        setMode(newMode);
+
+        int presetVal = s.value(QStringLiteral("Appearance/fontPreset"), static_cast<int>(FontPreset::SansSerif)).toInt();
+        FontPreset newPreset = FontPreset::SansSerif;
+        if (presetVal >= 0 && presetVal <= 3) {
+            newPreset = static_cast<FontPreset>(presetVal);
+        }
+
+        QString customFamily = s.value(QStringLiteral("Appearance/customFontFamily")).toString();
+        if (newPreset == FontPreset::Custom && !customFamily.isEmpty()) {
+            setCustomFontFamily(customFamily);
+        } else {
+            setFontPreset(newPreset);
+        }
+
+        bool ok = false;
+        double pt = s.value(QStringLiteral("Appearance/basePointSize"), 12.0).toDouble(&ok);
+        if (ok && pt >= 8.0 && pt <= 36.0) {
+            setBasePointSize(pt);
+        } else {
+            setBasePointSize(12.0);
+        }
+    };
+
+    if (settings) {
+        readFromSettings(*settings);
+    } else {
+        QSettings s;
+        readFromSettings(s);
+    }
+}
+
+void ThemeManager::saveSettings(QSettings *settings) {
+    auto writeToSettings = [this](QSettings &s) {
+        s.setValue(QStringLiteral("Appearance/themeMode"), static_cast<int>(m_mode));
+        s.setValue(QStringLiteral("Appearance/fontPreset"), static_cast<int>(m_fontPreset));
+        s.setValue(QStringLiteral("Appearance/customFontFamily"), m_customFontFamily);
+        s.setValue(QStringLiteral("Appearance/basePointSize"), m_basePointSize);
+    };
+
+    if (settings) {
+        writeToSettings(*settings);
+    } else {
+        QSettings s;
+        writeToSettings(s);
+    }
 }
 
 void ThemeManager::updatePalette() {
@@ -505,6 +558,12 @@ QCheckBox {
     color: %8;
     font-size: 12px;
     spacing: 5px;
+}
+
+QLabel {
+    color: %8;
+    font-size: 12px;
+    padding: 0 4px;
 }
 )")
         .arg(p.appBackground.name())

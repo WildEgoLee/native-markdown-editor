@@ -8,6 +8,64 @@
 
 namespace MarkdownTool::UI {
 
+namespace {
+
+class FileFilterProxyModel : public QSortFilterProxyModel {
+public:
+    explicit FileFilterProxyModel(QObject *parent = nullptr)
+        : QSortFilterProxyModel(parent)
+    {
+        setRecursiveFilteringEnabled(false);
+    }
+
+    void setFilterPattern(const QString &pattern) {
+        m_filterText = pattern.trimmed();
+        invalidateFilter();
+    }
+
+    const QString &filterPattern() const { return m_filterText; }
+
+protected:
+    bool filterAcceptsRow(int sourceRow, const QModelIndex &sourceParent) const override {
+        auto *fsModel = qobject_cast<QFileSystemModel*>(sourceModel());
+        if (!fsModel) {
+            return true;
+        }
+
+        QModelIndex index = fsModel->index(sourceRow, 0, sourceParent);
+        if (!index.isValid()) {
+            return false;
+        }
+
+        // Directories are always shown to preserve folder navigation
+        if (fsModel->isDir(index)) {
+            return true;
+        }
+
+        // Files: only show supported document types (.md, .markdown, .txt)
+        const QString fileName = fsModel->fileName(index);
+        bool hasSupportedExt = fileName.endsWith(QStringLiteral(".md"), Qt::CaseInsensitive) ||
+                               fileName.endsWith(QStringLiteral(".markdown"), Qt::CaseInsensitive) ||
+                               fileName.endsWith(QStringLiteral(".txt"), Qt::CaseInsensitive);
+        if (!hasSupportedExt) {
+            return false;
+        }
+
+        // If no filter query, accept all supported files
+        if (m_filterText.isEmpty()) {
+            return true;
+        }
+
+        // Literal substring match (no wildcard interpretation, case-insensitive)
+        return fileName.contains(m_filterText, Qt::CaseInsensitive);
+    }
+
+private:
+    QString m_filterText;
+};
+
+} // namespace
+
 SidebarWidget::SidebarWidget(QWidget *parent)
     : QWidget(parent)
 {
@@ -63,11 +121,14 @@ SidebarWidget::SidebarWidget(QWidget *parent)
     // Page 1: Files
     m_fileTree = new QTreeView(m_stackWidget);
     m_fileModel = new QFileSystemModel(this);
-    m_fileModel->setNameFilters({QStringLiteral("*.md"), QStringLiteral("*.markdown"), QStringLiteral("*.txt")});
-    m_fileModel->setNameFilterDisables(false);
     m_fileModel->setRootPath(QDir::currentPath());
-    m_fileTree->setModel(m_fileModel);
-    m_fileTree->setRootIndex(m_fileModel->index(QDir::currentPath()));
+
+    auto *proxy = new FileFilterProxyModel(this);
+    proxy->setSourceModel(m_fileModel);
+    m_fileProxyModel = proxy;
+
+    m_fileTree->setModel(m_fileProxyModel);
+    m_fileTree->setRootIndex(m_fileProxyModel->mapFromSource(m_fileModel->index(QDir::currentPath())));
     m_fileTree->header()->hideSection(1);
     m_fileTree->header()->hideSection(2);
     m_fileTree->header()->hideSection(3);
@@ -85,8 +146,9 @@ SidebarWidget::SidebarWidget(QWidget *parent)
     connect(m_searchEdit, &QLineEdit::textChanged, this, &SidebarWidget::onSearchTextChanged);
 
     // Wire file tree click
-    connect(m_fileTree, &QTreeView::clicked, this, [this](const QModelIndex &index) {
-        QString filePath = m_fileModel->filePath(index);
+    connect(m_fileTree, &QTreeView::clicked, this, [this](const QModelIndex &proxyIndex) {
+        QModelIndex srcIndex = m_fileProxyModel->mapToSource(proxyIndex);
+        QString filePath = m_fileModel->filePath(srcIndex);
         if (QFileInfo(filePath).isFile()) {
             emit fileSelected(filePath);
         }
@@ -117,26 +179,33 @@ void SidebarWidget::switchToFiles() {
     m_outlineBtn->style()->polish(m_outlineBtn);
     m_filesBtn->style()->unpolish(m_filesBtn);
     m_filesBtn->style()->polish(m_filesBtn);
+
+    auto *proxy = static_cast<FileFilterProxyModel*>(m_fileProxyModel);
+    if (proxy) {
+        proxy->setFilterPattern(m_searchEdit->text());
+    }
 }
 
 void SidebarWidget::onSearchTextChanged(const QString &text) {
     if (m_stackWidget->currentIndex() == 0) {
         m_outlineWidget->filter(text);
     } else {
-        if (text.trimmed().isEmpty()) {
-            m_fileModel->setNameFilters({QStringLiteral("*.md"), QStringLiteral("*.markdown"), QStringLiteral("*.txt")});
-        } else {
-            m_fileModel->setNameFilters({QStringLiteral("*%1*.md").arg(text.trimmed()),
-                                         QStringLiteral("*%1*.markdown").arg(text.trimmed()),
-                                         QStringLiteral("*%1*.txt").arg(text.trimmed())});
+        auto *proxy = static_cast<FileFilterProxyModel*>(m_fileProxyModel);
+        if (proxy) {
+            proxy->setFilterPattern(text);
         }
     }
 }
 
 void SidebarWidget::setWorkspacePath(const QString &path) {
     m_fileModel->setRootPath(path);
-    m_fileTree->setRootIndex(m_fileModel->index(path));
+    m_fileTree->setRootIndex(m_fileProxyModel->mapFromSource(m_fileModel->index(path)));
     switchToFiles();
+}
+
+QString SidebarWidget::fileFilterPattern() const {
+    auto *proxy = static_cast<FileFilterProxyModel*>(m_fileProxyModel);
+    return proxy ? proxy->filterPattern() : QString();
 }
 
 void SidebarWidget::updateThemeStyles() {

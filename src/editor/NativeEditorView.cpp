@@ -641,32 +641,116 @@ void NativeEditorView::paste() {
     executeEdit(s, len, text);
 }
 
+const QVector<int> &NativeEditorView::ensureFindMatches(const QString &text, bool matchCase) const {
+    if (m_findCache.bufferRevision == m_buffer.revision() &&
+        m_findCache.query == text &&
+        m_findCache.matchCase == matchCase) {
+        return m_findCache.matches;
+    }
+
+    m_findCache.bufferRevision = m_buffer.revision();
+    m_findCache.query = text;
+    m_findCache.matchCase = matchCase;
+    m_findCache.matches.clear();
+
+    if (text.isEmpty() || m_buffer.isEmpty()) {
+        return m_findCache.matches;
+    }
+
+    Qt::CaseSensitivity cs = matchCase ? Qt::CaseSensitive : Qt::CaseInsensitive;
+    const QString &docText = m_buffer.text();
+    int idx = 0;
+    while ((idx = static_cast<int>(docText.indexOf(text, idx, cs))) != -1) {
+        m_findCache.matches.append(idx);
+        idx += text.length();
+    }
+    return m_findCache.matches;
+}
+
 bool NativeEditorView::findText(const QString &text, bool matchCase, bool forward) {
     if (text.isEmpty() || m_buffer.isEmpty()) {
         return false;
     }
 
-    Qt::CaseSensitivity cs = matchCase ? Qt::CaseSensitive : Qt::CaseInsensitive;
-    const QString &docText = m_buffer.text();
-
-    int from = forward ? m_cursorPos : qMax(0, m_cursorPos - text.length() - 1);
-    int idx = forward ? docText.indexOf(text, from, cs) : docText.lastIndexOf(text, from, cs);
-
-    if (idx == -1) {
-        // Wrap around search
-        idx = forward ? docText.indexOf(text, 0, cs) : docText.lastIndexOf(text, -1, cs);
+    const QVector<int> &matches = ensureFindMatches(text, matchCase);
+    if (matches.isEmpty()) {
+        return false;
     }
 
-    if (idx != -1) {
-        m_selectionAnchor = idx;
-        m_cursorPos = idx + text.length();
-        ensureCursorVisible();
-        viewport()->update();
-        auto lc = m_buffer.offsetToLineCol(m_cursorPos);
-        emit cursorMoved(lc.line1(), lc.col1(), m_cursorPos);
-        return true;
+    int selStart = qMin(m_cursorPos, m_selectionAnchor);
+    int selLen = qAbs(m_cursorPos - m_selectionAnchor);
+
+    int currentMatchIdx = -1;
+    if (selLen == text.length()) {
+        for (int i = 0; i < matches.size(); ++i) {
+            if (matches[i] == selStart) {
+                currentMatchIdx = i;
+                break;
+            }
+        }
     }
-    return false;
+
+    int targetIdx = -1;
+    int total = static_cast<int>(matches.size());
+    if (forward) {
+        if (currentMatchIdx != -1) {
+            targetIdx = matches[(currentMatchIdx + 1) % total];
+        } else {
+            targetIdx = matches[0];
+            for (int pos : matches) {
+                if (pos >= m_cursorPos) {
+                    targetIdx = pos;
+                    break;
+                }
+            }
+        }
+    } else {
+        if (currentMatchIdx != -1) {
+            targetIdx = matches[(currentMatchIdx - 1 + total) % total];
+        } else {
+            targetIdx = matches.last();
+            for (int i = total - 1; i >= 0; --i) {
+                if (matches[i] < selStart) {
+                    targetIdx = matches[i];
+                    break;
+                }
+            }
+        }
+    }
+
+    m_selectionAnchor = targetIdx;
+    m_cursorPos = targetIdx + text.length();
+    ensureCursorVisible();
+    viewport()->update();
+    auto lc = m_buffer.offsetToLineCol(m_cursorPos);
+    emit cursorMoved(lc.line1(), lc.col1(), m_cursorPos);
+    return true;
+}
+
+NativeEditorView::SearchMatchStatus NativeEditorView::searchStatus(const QString &text, bool matchCase) const {
+    if (text.isEmpty() || m_buffer.isEmpty()) {
+        return {0, 0};
+    }
+
+    const QVector<int> &matches = ensureFindMatches(text, matchCase);
+    if (matches.isEmpty()) {
+        return {0, 0};
+    }
+
+    int selStart = qMin(m_cursorPos, m_selectionAnchor);
+    int selLen = qAbs(m_cursorPos - m_selectionAnchor);
+
+    int current = 0;
+    if (selLen == text.length()) {
+        for (int i = 0; i < matches.size(); ++i) {
+            if (matches[i] == selStart) {
+                current = i + 1;
+                break;
+            }
+        }
+    }
+
+    return {current, static_cast<int>(matches.size())};
 }
 
 bool NativeEditorView::replaceOne(const QString &findStr, const QString &replaceStr, bool matchCase) {

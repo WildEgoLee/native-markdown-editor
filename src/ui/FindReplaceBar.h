@@ -17,11 +17,16 @@ public:
     void openFind();
     void openReplace();
 
+    QString findText() const;
+    bool matchCase() const;
+    void setMatchStatus(int current, int total);
+
 signals:
     void findNext(const QString &text, bool matchCase);
     void findPrev(const QString &text, bool matchCase);
     void replaceOne(const QString &findText, const QString &replaceText, bool matchCase);
     void replaceAll(const QString &findText, const QString &replaceText, bool matchCase);
+    void findParamsChanged(const QString &text, bool matchCase);
     void closed();
 
 protected:

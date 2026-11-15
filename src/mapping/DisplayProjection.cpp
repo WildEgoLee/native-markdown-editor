@@ -145,6 +145,21 @@ int DisplayProjection::normalizeSourceCursor(int sourceOffset, bool forward) con
             }
         }
     }
+    if (block.isTableBlock) {
+        for (const auto &row : block.tableData.rows) {
+            for (const auto &cell : row.cells) {
+                if (cell.sourceRange.contains(sourceOffset)) {
+                    for (const auto &seg : cell.segments) {
+                        if (seg.type == SegmentType::HiddenMarker && seg.sourceRange.isValid()) {
+                            if (seg.sourceRange.contains(sourceOffset)) {
+                                return forward ? seg.sourceRange.end : seg.sourceRange.start;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     return sourceOffset;
 }
 
@@ -167,6 +182,21 @@ int DisplayProjection::stepCursor(int currentSourceOffset, bool forward, const C
                     }
                 }
             }
+            if (block.isTableBlock) {
+                for (const auto &row : block.tableData.rows) {
+                    for (const auto &cell : row.cells) {
+                        if (cell.sourceRange.contains(next)) {
+                            for (const auto &seg : cell.segments) {
+                                if (seg.type == SegmentType::HiddenMarker && seg.sourceRange.isValid()) {
+                                    if (seg.sourceRange.contains(next) && next < seg.sourceRange.end) {
+                                        return seg.sourceRange.end;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         return next;
     } else {
@@ -183,6 +213,21 @@ int DisplayProjection::stepCursor(int currentSourceOffset, bool forward, const C
                 if (seg.type == SegmentType::HiddenMarker && seg.sourceRange.isValid()) {
                     if (seg.sourceRange.contains(prev) && prev > seg.sourceRange.start) {
                         return seg.sourceRange.start;
+                    }
+                }
+            }
+            if (block.isTableBlock) {
+                for (const auto &row : block.tableData.rows) {
+                    for (const auto &cell : row.cells) {
+                        if (cell.sourceRange.contains(prev)) {
+                            for (const auto &seg : cell.segments) {
+                                if (seg.type == SegmentType::HiddenMarker && seg.sourceRange.isValid()) {
+                                    if (seg.sourceRange.contains(prev) && prev > seg.sourceRange.start) {
+                                        return seg.sourceRange.start;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -541,37 +586,8 @@ bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
                     return true;
                 }
             }
-            if (b1.isTableBlock) {
-                if (b1.tableData.colCount != b2.tableData.colCount ||
-                    b1.tableData.rows.size() != b2.tableData.rows.size() ||
-                    b1.tableData.alignments != b2.tableData.alignments ||
-                    b1.tableData.sourceRange != b2.tableData.sourceRange)
-                {
-                    return true;
-                }
-                for (int r = 0; r < b1.tableData.rows.size(); ++r) {
-                    const auto &r1 = b1.tableData.rows[r];
-                    const auto &r2 = b2.tableData.rows[r];
-                    if (r1.cells.size() != r2.cells.size() ||
-                        r1.sourceRange != r2.sourceRange ||
-                        r1.isHeader != r2.isHeader)
-                    {
-                        return true;
-                    }
-                    for (int c = 0; c < r1.cells.size(); ++c) {
-                        const auto &c1 = r1.cells[c];
-                        const auto &c2 = r2.cells[c];
-                        if (c1.text != c2.text ||
-                            c1.sourceRange != c2.sourceRange ||
-                            c1.visualStart != c2.visualStart ||
-                            c1.visualLength != c2.visualLength ||
-                            c1.alignment != c2.alignment ||
-                            c1.segments.size() != c2.segments.size())
-                        {
-                            return true;
-                        }
-                    }
-                }
+            if (b1.isTableBlock && b1.tableData != b2.tableData) {
+                return true;
             }
         }
         return false;

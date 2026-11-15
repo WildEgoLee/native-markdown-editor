@@ -29,6 +29,19 @@ struct VisualSegment {
     bool isInteractive = false;
 };
 
+inline bool operator==(const VisualSegment &a, const VisualSegment &b) {
+    return a.sourceRange == b.sourceRange &&
+           a.visualStart == b.visualStart &&
+           a.visualLength == b.visualLength &&
+           a.type == b.type &&
+           a.format == b.format &&
+           a.text == b.text &&
+           a.isInteractive == b.isInteractive;
+}
+inline bool operator!=(const VisualSegment &a, const VisualSegment &b) {
+    return !(a == b);
+}
+
 struct TableCellVisual {
     QString text;
     Core::SourceRange sourceRange;
@@ -42,11 +55,33 @@ struct TableCellVisual {
     int visualToSource(int visualOffset, bool preferTrailing = false) const;
 };
 
+inline bool operator==(const TableCellVisual &a, const TableCellVisual &b) {
+    return a.text == b.text &&
+           a.sourceRange == b.sourceRange &&
+           a.visualStart == b.visualStart &&
+           a.visualLength == b.visualLength &&
+           a.alignment == b.alignment &&
+           a.isHeader == b.isHeader &&
+           a.segments == b.segments;
+}
+inline bool operator!=(const TableCellVisual &a, const TableCellVisual &b) {
+    return !(a == b);
+}
+
 struct TableRowVisual {
     QVector<TableCellVisual> cells;
     bool isHeader = false;
     Core::SourceRange sourceRange;
 };
+
+inline bool operator==(const TableRowVisual &a, const TableRowVisual &b) {
+    return a.isHeader == b.isHeader &&
+           a.sourceRange == b.sourceRange &&
+           a.cells == b.cells;
+}
+inline bool operator!=(const TableRowVisual &a, const TableRowVisual &b) {
+    return !(a == b);
+}
 
 struct TableVisualData {
     QVector<TableRowVisual> rows;
@@ -54,6 +89,16 @@ struct TableVisualData {
     QVector<Qt::AlignmentFlag> alignments;
     Core::SourceRange sourceRange;
 };
+
+inline bool operator==(const TableVisualData &a, const TableVisualData &b) {
+    return a.colCount == b.colCount &&
+           a.sourceRange == b.sourceRange &&
+           a.alignments == b.alignments &&
+           a.rows == b.rows;
+}
+inline bool operator!=(const TableVisualData &a, const TableVisualData &b) {
+    return !(a == b);
+}
 
 struct VisualBlock {
     Parser::NodeType blockType = Parser::NodeType::Paragraph;

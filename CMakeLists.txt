@@ -10,7 +10,8 @@ if(MSVC)
     if(CMAKE_GENERATOR MATCHES "Ninja")
         file(WRITE "${CMAKE_BINARY_DIR}/CMakeFiles/showinc_detect.h" "")
         file(WRITE "${CMAKE_BINARY_DIR}/CMakeFiles/showinc_detect.c" "#include \"showinc_detect.h\"\n")
-        foreach(_enc UTF-8 AUTO ANSI OEM)
+        set(_best_prefix "")
+        foreach(_enc AUTO ANSI UTF-8 OEM)
             execute_process(
                 COMMAND "${CMAKE_C_COMPILER}" /nologo /showIncludes /c "${CMAKE_BINARY_DIR}/CMakeFiles/showinc_detect.c"
                 WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/CMakeFiles"
@@ -18,11 +19,18 @@ if(MSVC)
                 ERROR_VARIABLE _showinc_out
                 ENCODING ${_enc}
             )
-            if(_showinc_out MATCHES "([^\r\n]+)[ ]+.*showinc_detect\\.h")
-                set(CMAKE_CL_SHOWINCLUDES_PREFIX "${CMAKE_MATCH_1} " CACHE INTERNAL "ShowIncludes prefix" FORCE)
-                break()
+            if(_showinc_out MATCHES "[\r\n]([^\r\n]+:)[ ]+[^\r\n]*showinc_detect\\.h")
+                set(_cand "${CMAKE_MATCH_1} ")
+                # Strictly reject mojibake or replacement character artifacts
+                if(NOT _cand MATCHES "(娉|鍖)")
+                    set(_best_prefix "${_cand}")
+                    break()
+                endif()
             endif()
         endforeach()
+        if(_best_prefix)
+            set(CMAKE_CL_SHOWINCLUDES_PREFIX "${_best_prefix}" CACHE INTERNAL "ShowIncludes prefix" FORCE)
+        endif()
     endif()
 endif()
 

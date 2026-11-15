@@ -111,6 +111,8 @@ private slots:
     void testNinjaDependencyTrackingIntegrity();
     void testFormattedTableCellPositionMappingAndHitTest();
     void testWideTableHorizontalScrollingAndNavigation();
+    void testTableCellInlineFormatChangeInvalidatesLayoutCache();
+    void testFormattedTableCellSelectionHighlightAndCursorStep();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempSettingsDir;
@@ -4728,7 +4730,13 @@ void TestProbes::testNinjaDependencyTrackingIntegrity() {
         depsFile.setFileName(QStringLiteral("build/.ninja_deps"));
     }
     QVERIFY2(depsFile.exists(), ".ninja_deps must exist in build directory");
-    QVERIFY2(depsFile.size() > 0, ".ninja_deps must be non-empty and actively recording dependencies");
+    QVERIFY2(depsFile.open(QIODevice::ReadOnly), ".ninja_deps must be readable");
+    QByteArray depsContent = depsFile.readAll();
+    depsFile.close();
+    QVERIFY2(depsContent.size() > 0, ".ninja_deps must be non-empty and actively recording dependencies");
+    // Actively verify that core header dependencies are recorded in the binary database
+    QVERIFY2(depsContent.contains("LayoutEngine.h"), ".ninja_deps must actively track LayoutEngine.h");
+    QVERIFY2(depsContent.contains("DisplayProjection.h"), ".ninja_deps must actively track DisplayProjection.h");
 }
 
 void TestProbes::testFormattedTableCellPositionMappingAndHitTest() {
@@ -4857,6 +4865,154 @@ void TestProbes::testWideTableHorizontalScrollingAndNavigation() {
 
     // Horizontal scrollbar must have scrolled right to bring column 10 into view
     QVERIFY2(hBar->value() > 0, "Horizontal scrollbar must scroll right to ensure wide column 10 is visible");
+}
+
+void TestProbes::testTableCellInlineFormatChangeInvalidatesLayoutCache() {
+    Parser::MarkdownParserAdapter parser;
+    Core::TextBuffer buffer;
+    buffer.setText(QStringLiteral(
+        "| 内容 |\n"
+        "| --- |\n"
+        "| **数据** |\n"
+    ));
+
+    auto root1 = parser.parse(buffer);
+    QVERIFY(root1 != nullptr);
+
+    Mapping::DisplayProjection projection;
+    bool changed1 = projection.buildProjection(root1, buffer, 0, false);
+    QVERIFY(changed1);
+    QCOMPARE(projection.blocks().size(), 1);
+
+    Editor::LayoutEngine engine;
+    engine.layout(projection, 800.0);
+    QCOMPARE(engine.blocks().size(), 1);
+
+    const auto &cell1 = engine.blocks()[0].tableLayout.rows[1].cells[0];
+    QCOMPARE(cell1.text, QStringLiteral("数据"));
+    QVERIFY(cell1.layout != nullptr);
+    auto formats1 = cell1.layout->formats();
+    QVERIFY(!formats1.isEmpty());
+    QVERIFY(formats1[0].format.fontWeight() == QFont::Bold);
+    QVERIFY(!formats1[0].format.fontStrikeOut());
+
+    // 2. Modify in-place from **数据** to ~~数据~~
+    // Note: Same cell visible text "数据", same cell length, same segment count (3: marker, text, marker)
+    buffer.setText(QStringLiteral(
+        "| 内容 |\n"
+        "| --- |\n"
+        "| ~~数据~~ |\n"
+    ));
+
+    auto root2 = parser.parse(buffer);
+    QVERIFY(root2 != nullptr);
+
+    bool changed2 = projection.buildProjection(root2, buffer, 0, false);
+    QVERIFY2(changed2, "DisplayProjection::checkChanged() must detect table cell formatting change (** to ~~)!");
+
+    // Layout WITHOUT calling engine.invalidateLayout() to test cache invalidation
+    engine.layout(projection, 800.0);
+    QCOMPARE(engine.blocks().size(), 1);
+
+    const auto &cell2 = engine.blocks()[0].tableLayout.rows[1].cells[0];
+    QCOMPARE(cell2.text, QStringLiteral("数据"));
+    QVERIFY(cell2.layout != nullptr);
+    auto formats2 = cell2.layout->formats();
+    QVERIFY(!formats2.isEmpty());
+    QVERIFY2(formats2[0].format.fontStrikeOut(), "Table cell layout must be reflowed with strikethrough format!");
+    QVERIFY2(formats2[0].format.fontWeight() != QFont::Bold, "Table cell layout must NOT retain stale bold format!");
+
+    // 3. Modify in-place from ~~数据~~ to *数据*
+    buffer.setText(QStringLiteral(
+        "| 内容 |\n"
+        "| --- |\n"
+        "| *数据* |\n"
+    ));
+
+    auto root3 = parser.parse(buffer);
+    QVERIFY(root3 != nullptr);
+
+    bool changed3 = projection.buildProjection(root3, buffer, 0, false);
+    QVERIFY2(changed3, "DisplayProjection::checkChanged() must detect table cell formatting change (~~ to *)!");
+
+    engine.layout(projection, 800.0);
+    const auto &cell3 = engine.blocks()[0].tableLayout.rows[1].cells[0];
+    QCOMPARE(cell3.text, QStringLiteral("数据"));
+    QVERIFY(cell3.layout != nullptr);
+    auto formats3 = cell3.layout->formats();
+    QVERIFY(!formats3.isEmpty());
+    QVERIFY2(formats3[0].format.fontItalic(), "Table cell layout must be reflowed with italic format!");
+    QVERIFY2(!formats3[0].format.fontStrikeOut(), "Table cell layout must NOT retain stale strikethrough format!");
+}
+
+void TestProbes::testFormattedTableCellSelectionHighlightAndCursorStep() {
+    Parser::MarkdownParserAdapter parser;
+    Core::TextBuffer buffer;
+    buffer.setText(QStringLiteral(
+        "| **重要数据** |\n"
+        "| :--- |\n"
+        "| `核心代码` |\n"
+    ));
+
+    auto root = parser.parse(buffer);
+    QVERIFY(root != nullptr);
+
+    Mapping::DisplayProjection projection;
+    projection.buildProjection(root, buffer, 0, false);
+    QCOMPARE(projection.blocks().size(), 1);
+
+    Editor::LayoutEngine engine;
+    engine.layout(projection, 800.0);
+    const auto &tableBlock = engine.blocks()[0];
+    const auto &boldCell = tableBlock.tableLayout.rows[0].cells[0];
+    QCOMPARE(boldCell.text, QStringLiteral("重要数据"));
+
+    // 1. Source to visual selection mapping
+    int contentStart = buffer.text().indexOf(QStringLiteral("重要数据"));
+    QVERIFY(contentStart > 0);
+
+    // Selecting "重要" (first two characters) in source: [contentStart, contentStart + 2]
+    int visS1 = boldCell.sourceToVisual(contentStart);
+    int visE1 = boldCell.sourceToVisual(contentStart + 2);
+    QCOMPARE(visS1, 0);
+    QCOMPARE(visE1, 2);
+
+    // Selecting entire cell including '**' markers in source: [boldCell.sourceRange.start, boldCell.sourceRange.end]
+    int visS2 = boldCell.sourceToVisual(boldCell.sourceRange.start);
+    int visE2 = boldCell.sourceToVisual(boldCell.sourceRange.end);
+    QCOMPARE(visS2, 0);
+    QCOMPARE(visE2, 4);
+
+    // 2. stepCursor navigation across hidden syntax markers in table cells
+    int boldSyntaxStart = contentStart - 2;
+
+    // Step forward into opening '**' must jump to contentStart (before '重')
+    int stepForward1 = projection.stepCursor(boldSyntaxStart, true, buffer);
+    QCOMPARE(stepForward1, contentStart);
+
+    // Step forward from '重' to '要'
+    int stepForward2 = projection.stepCursor(contentStart, true, buffer);
+    QCOMPARE(stepForward2, contentStart + 1);
+
+    // Step forward from after '据' (contentStart + 4) must jump past closing '**'
+    int boldSyntaxEnd = contentStart + 4;
+    int stepForward3 = projection.stepCursor(boldSyntaxEnd, true, buffer);
+    QCOMPARE(stepForward3, boldSyntaxEnd + 2);
+
+    // Step backward from after closing '**' must jump before closing '**' (after '据')
+    int stepBackward1 = projection.stepCursor(boldSyntaxEnd + 2, false, buffer);
+    QCOMPARE(stepBackward1, boldSyntaxEnd);
+
+    // Step backward from '重' (contentStart) must jump before opening '**'
+    int stepBackward2 = projection.stepCursor(contentStart, false, buffer);
+    QCOMPARE(stepBackward2, boldSyntaxStart);
+
+    // 3. normalizeSourceCursor inside hidden markers in table cells
+    int normForward = projection.normalizeSourceCursor(boldSyntaxStart + 1, true);
+    QCOMPARE(normForward, contentStart);
+
+    int normBackward = projection.normalizeSourceCursor(boldSyntaxStart + 1, false);
+    QCOMPARE(normBackward, boldSyntaxStart);
 }
 
 QTEST_MAIN(TestProbes)

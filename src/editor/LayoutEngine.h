@@ -27,6 +27,32 @@ struct TableCellLayout {
     int visualToSource(int visualOffset, bool preferTrailing = false) const;
 };
 
+inline bool operator==(const TableCellLayout &a, const TableCellLayout &b) {
+    return a.text == b.text &&
+           a.sourceRange == b.sourceRange &&
+           a.visualStart == b.visualStart &&
+           a.visualLength == b.visualLength &&
+           a.alignment == b.alignment &&
+           a.isHeader == b.isHeader &&
+           a.segments == b.segments;
+}
+inline bool operator!=(const TableCellLayout &a, const TableCellLayout &b) {
+    return !(a == b);
+}
+
+inline bool operator==(const TableCellLayout &a, const Mapping::TableCellVisual &b) {
+    return a.text == b.text &&
+           a.sourceRange == b.sourceRange &&
+           a.visualStart == b.visualStart &&
+           a.visualLength == b.visualLength &&
+           a.alignment == b.alignment &&
+           a.isHeader == b.isHeader &&
+           a.segments == b.segments;
+}
+inline bool operator!=(const TableCellLayout &a, const Mapping::TableCellVisual &b) {
+    return !(a == b);
+}
+
 struct TableRowLayout {
     QRectF rect;
     QVector<TableCellLayout> cells;

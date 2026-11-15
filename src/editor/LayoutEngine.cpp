@@ -452,9 +452,7 @@ bool LayoutEngine::isBlockLayoutEqual(const Mapping::VisualBlock &vBlock,
             for (int c = 0; c < tRow.cells.size(); ++c) {
                 const auto &tCell = tRow.cells[c];
                 const auto &lCell = lRow.cells[c];
-                if (lCell.alignment != tCell.alignment ||
-                    lCell.sourceRange != tCell.sourceRange ||
-                    lCell.text != tCell.text) {
+                if (lCell != tCell) {
                     return false;
                 }
             }
@@ -901,21 +899,23 @@ void LayoutEngine::paint(QPainter *painter,
                             int selS = qMax(sel.selectionStart(), cell.sourceRange.start);
                             int selE = qMin(sel.selectionEnd(), cell.sourceRange.end);
                             if (selS < selE) {
-                                int relS = selS - cell.sourceRange.start;
-                                int relE = selE - cell.sourceRange.start;
-                                painter->setPen(Qt::NoPen);
-                                painter->setBrush(palette.selectionHighlight);
-                                for (int l = 0; l < cell.layout->lineCount(); ++l) {
-                                    QTextLine line = cell.layout->lineAt(l);
-                                    int lStart = line.textStart();
-                                    int lEnd = lStart + line.textLength();
-                                    int s = qMax(relS, lStart);
-                                    int e = qMin(relE, lEnd);
-                                    if (s < e) {
-                                        qreal x1 = cell.rect.left() + 10.0 + line.cursorToX(s);
-                                        qreal x2 = cell.rect.left() + 10.0 + line.cursorToX(e);
-                                        QRectF selR(qMin(x1, x2), textY + line.y(), qAbs(x2 - x1), line.height());
-                                        painter->drawRect(selR);
+                                int visS = cell.sourceToVisual(selS);
+                                int visE = cell.sourceToVisual(selE);
+                                if (visS < visE) {
+                                    painter->setPen(Qt::NoPen);
+                                    painter->setBrush(palette.selectionHighlight);
+                                    for (int l = 0; l < cell.layout->lineCount(); ++l) {
+                                        QTextLine line = cell.layout->lineAt(l);
+                                        int lStart = line.textStart();
+                                        int lEnd = lStart + line.textLength();
+                                        int s = qMax(visS, lStart);
+                                        int e = qMin(visE, lEnd);
+                                        if (s < e) {
+                                            qreal x1 = cell.rect.left() + 10.0 + line.cursorToX(s);
+                                            qreal x2 = cell.rect.left() + 10.0 + line.cursorToX(e);
+                                            QRectF selR(qMin(x1, x2), textY + line.y(), qAbs(x2 - x1), line.height());
+                                            painter->drawRect(selR);
+                                        }
                                     }
                                 }
                             }

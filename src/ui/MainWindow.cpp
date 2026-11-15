@@ -173,6 +173,7 @@ void MainWindow::setupMenusAndToolbars() {
     fileMenu->addAction(QStringLiteral("打开工作区文件夹..."), this, &MainWindow::openFolderDialog);
     m_recentMenu = fileMenu->addMenu(Theme::ThemeManager::instance().icon(QStringLiteral("history"), 16),
                                      QStringLiteral("最近打开 (&R)"));
+    m_recentMenu->setToolTipsVisible(true);
     connect(m_recentMenu, &QMenu::aboutToShow, this, &MainWindow::updateRecentFilesMenu);
     updateRecentFilesMenu();
     fileMenu->addSeparator();
@@ -518,9 +519,10 @@ void MainWindow::updateRecentFilesMenu() {
             text = fi.fileName();
         }
 
+        QString nativePath = QDir::toNativeSeparators(fi.exists() ? fi.absoluteFilePath() : path);
         auto *act = m_recentMenu->addAction(Theme::ThemeManager::instance().icon(QStringLiteral("file"), 16), text);
-        act->setToolTip(path);
-        act->setStatusTip(path);
+        act->setToolTip(nativePath);
+        act->setStatusTip(nativePath);
         connect(act, &QAction::triggered, this, [this, path]() {
             if (!QFile::exists(path)) {
                 auto btn = QMessageBox::warning(this,

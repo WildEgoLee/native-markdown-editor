@@ -158,6 +158,8 @@ SidebarWidget::SidebarWidget(QWidget *parent)
     m_recentTree->setAnimated(true);
     m_recentTree->setIndentation(16);
     m_recentTree->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_recentTree->setMouseTracking(true);
+    m_recentTree->viewport()->setMouseTracking(true);
 
     m_emptyRecentLabel = new QLabel(QStringLiteral("暂无历史记录\n打开或编辑文档后将在此列出"), m_recentPage);
     m_emptyRecentLabel->setAlignment(Qt::AlignCenter);
@@ -277,11 +279,13 @@ void SidebarWidget::refreshRecentItems() {
 
     for (const QString &path : m_recentFiles) {
         QFileInfo fi(path);
+        QString nativePath = QDir::toNativeSeparators(fi.exists() ? fi.absoluteFilePath() : path);
         auto *item = new QTreeWidgetItem(m_recentTree);
         item->setIcon(0, Theme::ThemeManager::instance().icon(QStringLiteral("file"), 16));
         item->setText(0, fi.fileName());
-        item->setToolTip(0, fi.absoluteFilePath());
-        item->setData(0, Qt::UserRole, fi.absoluteFilePath());
+        item->setToolTip(0, nativePath);
+        item->setStatusTip(0, nativePath);
+        item->setData(0, Qt::UserRole, nativePath);
     }
 
     filterRecentItems(m_searchEdit ? m_searchEdit->text() : QString());

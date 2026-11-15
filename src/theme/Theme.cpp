@@ -596,6 +596,15 @@ QCheckBox::indicator:checked {
 QLabel {
     color: %1;
 }
+
+QToolTip {
+    background-color: %8;
+    color: %1;
+    border: 1px solid %3;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 12px;
+}
 )")
         .arg(p.primaryText.name())
         .arg(p.appBackground.name())
@@ -691,6 +700,15 @@ QHeaderView::section {
     font-size: 11px;
     font-weight: 600;
     padding: 4px 6px;
+}
+
+QToolTip {
+    background-color: %6;
+    color: %5;
+    border: 1px solid %2;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 12px;
 }
 )")
         .arg(p.sidebarBackground.name())

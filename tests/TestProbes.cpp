@@ -4120,19 +4120,28 @@ void TestProbes::testRecentFilesHistoryPersistenceAndMenu() {
     QCOMPARE(w1.recentFiles(), QStringList({normC, normA, normB}));
     QCOMPARE(w1.sidebar()->recentTree()->topLevelItemCount(), 3);
 
-    // 3. Verify Menu Actions and Shortcuts
+    // 3. Verify Menu Actions and Shortcuts & Tooltips
+    QVERIFY(w1.recentFilesMenu()->toolTipsVisible());
     const auto &menuActions = w1.recentFilesMenu()->actions();
     // 3 items + 1 separator + 1 clear action = 5 actions
     QCOMPARE(menuActions.size(), 5);
     QVERIFY(menuActions[0]->text().contains(QStringLiteral("&1")));
     QVERIFY(menuActions[0]->text().contains(QStringLiteral("fileC_archive.md")));
+    QCOMPARE(menuActions[0]->toolTip(), normC);
     QVERIFY(menuActions[1]->text().contains(QStringLiteral("&2")));
     QVERIFY(menuActions[1]->text().contains(QStringLiteral("fileA_notes.md")));
+    QCOMPARE(menuActions[1]->toolTip(), normA);
     QVERIFY(menuActions[2]->text().contains(QStringLiteral("&3")));
     QVERIFY(menuActions[2]->text().contains(QStringLiteral("fileB_report.markdown")));
+    QCOMPARE(menuActions[2]->toolTip(), normB);
     QVERIFY(menuActions[3]->isSeparator());
     QVERIFY(menuActions[4]->text().contains(QStringLiteral("清空历史记录")));
     QVERIFY(menuActions[4]->isEnabled());
+
+    // Verify Sidebar Tree Item Tooltips with Full Native Path
+    QCOMPARE(w1.sidebar()->recentTree()->topLevelItem(0)->toolTip(0), normC);
+    QCOMPARE(w1.sidebar()->recentTree()->topLevelItem(1)->toolTip(0), normA);
+    QCOMPARE(w1.sidebar()->recentTree()->topLevelItem(2)->toolTip(0), normB);
 
     // 4. Verify Sidebar Search Filtering
     w1.sidebar()->switchToRecent();

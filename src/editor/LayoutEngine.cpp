@@ -515,6 +515,9 @@ int LayoutEngine::hitTest(const QPointF &point, const Mapping::DisplayProjection
     }
 
     const auto &bData = m_blocks[targetIndex];
+    if (bData.visualBlockIndex < 0 || bData.visualBlockIndex >= vBlocks.size()) {
+        return 0;
+    }
     const auto &vBlock = vBlocks[bData.visualBlockIndex];
 
     if (bData.isTableBlock) {
@@ -588,6 +591,9 @@ QRectF LayoutEngine::cursorRect(int sourceOffset, const Mapping::DisplayProjecti
     }
 
     const auto &bData = m_blocks[blockIdx];
+    if (bData.visualBlockIndex < 0 || bData.visualBlockIndex >= vBlocks.size()) {
+        return QRectF(bData.rect.left(), bData.rect.top(), 2, 24);
+    }
     const auto &vBlock = vBlocks[bData.visualBlockIndex];
 
     if (bData.isTableBlock) {

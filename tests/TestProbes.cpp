@@ -104,6 +104,7 @@ private slots:
     void testRecentFilesHistoryPersistenceAndMenu();
     void testAdaptiveReadingWidthAndTypographyReflow();
     void testMarkdownTableNativeLayoutAndInteraction();
+    void testCtrlWheelZoomStabilityAndBoundaryChecks();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempSettingsDir;
@@ -4407,6 +4408,88 @@ void TestProbes::testMarkdownTableNativeLayoutAndInteraction() {
     mw.show();
     QTest::qWait(50);
     QCOMPARE(mw.findChild<QSplitter*>()->sizes().value(0), 260);
+}
+
+void TestProbes::testCtrlWheelZoomStabilityAndBoundaryChecks() {
+    Editor::NativeEditorView editor;
+    editor.resize(1000, 700);
+
+    // Document with tables, math, diagrams, code blocks, and rich text
+    QString doc = QStringLiteral(
+        "# 综合压力与缩放稳定性测试\n\n"
+        "| 指标 | 目标值 | 状态 |\n"
+        "| :--- | :---: | ---: |\n"
+        "| 缩放抗震 | 100% | 稳定 |\n"
+        "| 表格重排 | 自适应 | 正常 |\n"
+        "| 边界探测 | 容错 | 通过 |\n\n"
+        "```cpp\n"
+        "void testZoom() {\n"
+        "    int delta = 120;\n"
+        "}\n"
+        "```\n\n"
+        "$$\\int_{0}^{\\infty} e^{-x^2} dx = \\frac{\\sqrt{\\pi}}{2}$$\n\n"
+        "> 这是一个引用测试段落，附带重要说明。\n\n"
+        "- [x] 完成多级滚轮缩放抗冲击验证\n"
+        "- [ ] 验证负向边界安全保护\n"
+    );
+
+    editor.buffer().setText(doc);
+    editor.reparseAndRelayout();
+
+    Theme::ThemeManager::instance().setBasePointSize(12.0);
+
+    QPoint pos(500, 350);
+    QPoint globalPos(500, 350);
+
+    // 1. Rapid high-delta wheel zoom-in bursts (+240, +360, +480)
+    for (int delta : {240, 360, 480, 240}) {
+        QWheelEvent ev(pos, globalPos, QPoint(), QPoint(0, delta), Qt::NoButton, Qt::ControlModifier, Qt::NoScrollPhase, false);
+        QApplication::sendEvent(editor.viewport(), &ev);
+        QVERIFY(Theme::ThemeManager::instance().basePointSize() <= Theme::ThemeManager::maxPointSize());
+        QVERIFY(Theme::ThemeManager::instance().basePointSize() >= 12.0);
+    }
+    // Font must have zoomed up to maxPointSize or near it
+    QVERIFY(Theme::ThemeManager::instance().basePointSize() >= 20.0);
+
+    // 2. Rapid high-delta wheel zoom-out bursts down to minimum
+    for (int delta : {-480, -480, -480, -480, -480}) {
+        QWheelEvent ev(pos, globalPos, QPoint(), QPoint(0, delta), Qt::NoButton, Qt::ControlModifier, Qt::NoScrollPhase, false);
+        QApplication::sendEvent(editor.viewport(), &ev);
+        QVERIFY(Theme::ThemeManager::instance().basePointSize() >= Theme::ThemeManager::minPointSize());
+    }
+    QCOMPARE(Theme::ThemeManager::instance().basePointSize(), Theme::ThemeManager::minPointSize());
+
+    // Reset base point size back to 12.0
+    Theme::ThemeManager::instance().setBasePointSize(12.0);
+
+    // 3. LayoutEngine robustness on extreme and invalid offset boundary conditions
+    Editor::LayoutEngine engine;
+    Mapping::DisplayProjection projection;
+    Parser::MarkdownParserAdapter parser;
+    auto root = parser.parse(editor.buffer());
+    projection.buildProjection(root, editor.buffer(), 0, false);
+    engine.layout(projection, 800.0);
+
+    // Extreme negative and positive offsets
+    QRectF cRectNeg = engine.cursorRect(-100, projection);
+    QVERIFY(cRectNeg.isValid());
+    QRectF cRectHuge = engine.cursorRect(999999, projection);
+    QVERIFY(cRectHuge.isValid());
+
+    // Extreme negative and positive coordinates in hitTest
+    int hitNeg = engine.hitTest(QPointF(-500.0, -500.0), projection);
+    QVERIFY(hitNeg >= 0);
+    int hitHuge = engine.hitTest(QPointF(50000.0, 50000.0), projection);
+    QVERIFY(hitHuge <= editor.buffer().length());
+
+    // Empty projection safety
+    Mapping::DisplayProjection emptyProj;
+    Editor::LayoutEngine emptyEngine;
+    emptyEngine.layout(emptyProj, 800.0);
+    QRectF emptyCRect = emptyEngine.cursorRect(0, emptyProj);
+    QVERIFY(emptyCRect.isValid());
+    int emptyHit = emptyEngine.hitTest(QPointF(10.0, 10.0), emptyProj);
+    QCOMPARE(emptyHit, 0);
 }
 
 QTEST_MAIN(TestProbes)

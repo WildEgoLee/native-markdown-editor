@@ -34,6 +34,15 @@ NativeEditorView::NativeEditorView(QWidget *parent)
     m_blinkTimer->start();
 
     auto onVisualRefresh = [this]() {
+        if (m_isVisualRefreshing) {
+            return;
+        }
+        m_isVisualRefreshing = true;
+        struct RefreshGuard {
+            bool &flag;
+            ~RefreshGuard() { flag = false; }
+        } guard{m_isVisualRefreshing};
+
         double oldHeight = m_layoutEngine.totalHeight();
         int oldScroll = verticalScrollBar()->value();
         QRectF cRect = m_layoutEngine.cursorRect(m_cursorPos, m_projection);
@@ -1654,13 +1663,18 @@ void NativeEditorView::wheelEvent(QWheelEvent *event) {
         }
         m_accumulatedZoomDelta += deltaY;
         constexpr int ZoomThreshold = 120;
+        int steps = 0;
         while (m_accumulatedZoomDelta >= ZoomThreshold) {
-            Theme::ThemeManager::instance().zoomIn();
+            steps++;
             m_accumulatedZoomDelta -= ZoomThreshold;
         }
         while (m_accumulatedZoomDelta <= -ZoomThreshold) {
-            Theme::ThemeManager::instance().zoomOut();
+            steps--;
             m_accumulatedZoomDelta += ZoomThreshold;
+        }
+        if (steps != 0) {
+            qreal curPt = Theme::ThemeManager::instance().basePointSize();
+            Theme::ThemeManager::instance().setBasePointSize(curPt + steps * 1.0);
         }
         event->accept();
         return;

@@ -83,6 +83,8 @@ public:
 
     qreal basePointSize() const { return m_basePointSize; }
     void setBasePointSize(qreal pt);
+    static constexpr qreal minPointSize() { return 8.0; }
+    static constexpr qreal maxPointSize() { return 36.0; }
     void zoomIn();
     void zoomOut();
     void resetZoom();

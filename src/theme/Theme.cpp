@@ -247,7 +247,7 @@ QString ThemeManager::currentFontDisplayName() const {
 }
 
 void ThemeManager::setBasePointSize(qreal pt) {
-    qreal clamped = std::clamp(pt, 8.0, 36.0);
+    qreal clamped = std::clamp(pt, minPointSize(), maxPointSize());
     if (std::abs(m_basePointSize - clamped) > 0.01) {
         m_basePointSize = clamped;
         emit typographyChanged();

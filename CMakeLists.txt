@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(MSVC)
     add_compile_options(/utf-8 /wd4819)
+    # Ensure Ninja correctly captures /showIncludes header dependencies under localized MSVC
+    set(CMAKE_CL_SHOWINCLUDES_PREFIX "注意: 包含文件:  " CACHE INTERNAL "ShowIncludes prefix")
 endif()
 
 set(CMAKE_AUTOMOC ON)

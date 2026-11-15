@@ -356,6 +356,7 @@ bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
                                                  oldBlock.isTaskChecked != newBlock.isTaskChecked ||
                                                  oldBlock.isMathBlock != newBlock.isMathBlock ||
                                                  oldBlock.isMermaidBlock != newBlock.isMermaidBlock ||
+                                                 oldBlock.isTableBlock != newBlock.isTableBlock ||
                                                  oldBlock.isInteractiveActive != newBlock.isInteractiveActive ||
                                                  oldBlock.embeddedSource != newBlock.embeddedSource ||
                                                  oldBlock.marginTop != newBlock.marginTop ||
@@ -430,6 +431,7 @@ bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
                 b1.isTaskChecked != b2.isTaskChecked ||
                 b1.isMathBlock != b2.isMathBlock ||
                 b1.isMermaidBlock != b2.isMermaidBlock ||
+                b1.isTableBlock != b2.isTableBlock ||
                 b1.isInteractiveActive != b2.isInteractiveActive ||
                 b1.embeddedSource != b2.embeddedSource ||
                 b1.marginTop != b2.marginTop ||

@@ -7,9 +7,12 @@
 #include <QToolBar>
 #include <QStatusBar>
 #include <QFileDialog>
+#include <QFontDialog>
 #include <QMessageBox>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QToolButton>
+#include <QActionGroup>
 #include <QVBoxLayout>
 
 namespace MarkdownTool::UI {
@@ -206,6 +209,60 @@ void MainWindow::setupMenusAndToolbars() {
     });
     toggleThemeAct->setShortcut(QKeySequence(QStringLiteral("Ctrl+T")));
 
+    // Font / Typography Menu
+    QMenu *fontMenu = mb->addMenu(QStringLiteral("字体 (&T)"));
+    auto *fontGroup = new QActionGroup(this);
+
+    auto *actSans = fontMenu->addAction(QStringLiteral("现代无衬线 (微软雅黑 / YaHei UI)"));
+    actSans->setCheckable(true);
+    actSans->setChecked(Theme::ThemeManager::instance().fontPreset() == Theme::ThemeManager::FontPreset::SansSerif);
+    fontGroup->addAction(actSans);
+    connect(actSans, &QAction::triggered, []() {
+        Theme::ThemeManager::instance().setFontPreset(Theme::ThemeManager::FontPreset::SansSerif);
+    });
+
+    auto *actSerif = fontMenu->addAction(QStringLiteral("典雅书卷体 (宋体 / Noto Serif)"));
+    actSerif->setCheckable(true);
+    actSerif->setChecked(Theme::ThemeManager::instance().fontPreset() == Theme::ThemeManager::FontPreset::Serif);
+    fontGroup->addAction(actSerif);
+    connect(actSerif, &QAction::triggered, []() {
+        Theme::ThemeManager::instance().setFontPreset(Theme::ThemeManager::FontPreset::Serif);
+    });
+
+    auto *actMono = fontMenu->addAction(QStringLiteral("极客等宽体 (Cascadia Code / Consolas)"));
+    actMono->setCheckable(true);
+    actMono->setChecked(Theme::ThemeManager::instance().fontPreset() == Theme::ThemeManager::FontPreset::Monospace);
+    fontGroup->addAction(actMono);
+    connect(actMono, &QAction::triggered, []() {
+        Theme::ThemeManager::instance().setFontPreset(Theme::ThemeManager::FontPreset::Monospace);
+    });
+
+    fontMenu->addSeparator();
+
+    auto *actCustom = fontMenu->addAction(QStringLiteral("选择自定义系统字体..."));
+    actCustom->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+F")));
+    connect(actCustom, &QAction::triggered, this, &MainWindow::showFontDialog);
+
+    fontMenu->addSeparator();
+
+    auto *actZoomIn = fontMenu->addAction(QStringLiteral("放大字号 (Ctrl+=)"));
+    actZoomIn->setShortcuts({QKeySequence(QStringLiteral("Ctrl+=")), QKeySequence(QStringLiteral("Ctrl++"))});
+    connect(actZoomIn, &QAction::triggered, []() {
+        Theme::ThemeManager::instance().zoomIn();
+    });
+
+    auto *actZoomOut = fontMenu->addAction(QStringLiteral("缩小字号 (Ctrl+-)"));
+    actZoomOut->setShortcut(QKeySequence(QStringLiteral("Ctrl+-")));
+    connect(actZoomOut, &QAction::triggered, []() {
+        Theme::ThemeManager::instance().zoomOut();
+    });
+
+    auto *actZoomReset = fontMenu->addAction(QStringLiteral("重置默认字号 (Ctrl+0)"));
+    actZoomReset->setShortcut(QKeySequence(QStringLiteral("Ctrl+0")));
+    connect(actZoomReset, &QAction::triggered, []() {
+        Theme::ThemeManager::instance().resetZoom();
+    });
+
     // Sleek Modern Toolbar
     QToolBar *tb = addToolBar(QStringLiteral("主工具栏"));
     tb->setMovable(false);
@@ -252,6 +309,16 @@ void MainWindow::setupMenusAndToolbars() {
     auto spacer = new QWidget(this);
     spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     tb->addWidget(spacer);
+
+    m_tbFont = tb->addAction(Theme::ThemeManager::instance().icon(QStringLiteral("font"), 18), QStringLiteral("更换字体与排版"));
+    m_tbFont->setToolTip(QStringLiteral("更换字体与排版 (Ctrl+Shift+F)"));
+    auto fontToolBtn = qobject_cast<QToolButton*>(tb->widgetForAction(m_tbFont));
+    if (fontToolBtn) {
+        fontToolBtn->setPopupMode(QToolButton::InstantPopup);
+        fontToolBtn->setMenu(fontMenu);
+    } else {
+        connect(m_tbFont, &QAction::triggered, this, &MainWindow::showFontDialog);
+    }
 
     m_tbTheme = tb->addAction(Theme::ThemeManager::instance().icon(QStringLiteral("theme"), 18), QStringLiteral("切换浅色/深色主题 (Ctrl+T)"));
     m_tbTheme->setToolTip(QStringLiteral("切换浅色 / 深色主题 (Ctrl+T)"));
@@ -300,12 +367,26 @@ void MainWindow::updateThemeStyles() {
     if (m_tbUndo) m_tbUndo->setIcon(Theme::ThemeManager::instance().icon(QStringLiteral("undo"), 18));
     if (m_tbRedo) m_tbRedo->setIcon(Theme::ThemeManager::instance().icon(QStringLiteral("redo"), 18));
     if (m_tbFind) m_tbFind->setIcon(Theme::ThemeManager::instance().icon(QStringLiteral("find"), 18));
+    if (m_tbFont) m_tbFont->setIcon(Theme::ThemeManager::instance().icon(QStringLiteral("font"), 18));
     if (m_tbTheme) m_tbTheme->setIcon(Theme::ThemeManager::instance().icon(QStringLiteral("theme"), 18));
     if (m_tbMode) {
         bool isSource = m_editorView ? m_editorView->isSourceMode() : false;
         m_tbMode->setIcon(Theme::ThemeManager::instance().icon(isSource ? QStringLiteral("source") : QStringLiteral("mode"), 18));
     }
     updateTitle();
+}
+
+void MainWindow::showFontDialog() {
+    bool ok = false;
+    QFont currentFont(Theme::ThemeManager::instance().proseFontFamilies().first(),
+                      static_cast<int>(Theme::ThemeManager::instance().basePointSize()));
+    QFont selectedFont = QFontDialog::getFont(&ok, currentFont, this, QStringLiteral("选择正文字体与字号"));
+    if (ok) {
+        Theme::ThemeManager::instance().setCustomFontFamily(selectedFont.family());
+        if (selectedFont.pointSize() > 0) {
+            Theme::ThemeManager::instance().setBasePointSize(selectedFont.pointSize());
+        }
+    }
 }
 
 void MainWindow::onRecoveryTimer() {

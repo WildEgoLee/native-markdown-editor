@@ -6,6 +6,7 @@
 #include <QMouseEvent>
 #include <QKeyEvent>
 #include <QScrollBar>
+#include <QApplication>
 #include <QGuiApplication>
 #include <QClipboard>
 #include <QDesktopServices>
@@ -32,11 +33,14 @@ NativeEditorView::NativeEditorView(QWidget *parent)
     connect(m_blinkTimer, &QTimer::timeout, this, &NativeEditorView::onBlinkTimer);
     m_blinkTimer->start();
 
-    connect(&Theme::ThemeManager::instance(), &Theme::ThemeManager::themeChanged, this, [this]() {
+    auto onVisualRefresh = [this]() {
         m_projection.buildProjection(m_rootNode, m_buffer, m_cursorPos, m_isSourceMode);
         m_layoutEngine.layout(m_projection, viewport()->width());
+        updateScrollBars();
         viewport()->update();
-    });
+    };
+    connect(&Theme::ThemeManager::instance(), &Theme::ThemeManager::themeChanged, this, onVisualRefresh);
+    connect(&Theme::ThemeManager::instance(), &Theme::ThemeManager::typographyChanged, this, onVisualRefresh);
 
     m_slashPopup = new UI::SlashCommandPopup(this);
     connect(m_slashPopup, &UI::SlashCommandPopup::actionTriggered, this, [this](const UI::SlashAction &action) {
@@ -321,6 +325,8 @@ void NativeEditorView::updateScrollBars() {
     int maxScrollY = qMax(0, static_cast<int>(m_layoutEngine.totalHeight()) - viewport()->height());
     verticalScrollBar()->setRange(0, maxScrollY);
     verticalScrollBar()->setPageStep(viewport()->height());
+    int scrollLines = qMax(1, QApplication::wheelScrollLines());
+    verticalScrollBar()->setSingleStep(static_cast<int>(scrollLines * 26.0));
 }
 
 void NativeEditorView::ensureCursorVisible() {
@@ -1502,6 +1508,44 @@ void NativeEditorView::dropEvent(QDropEvent *event) {
     }
 
     event->ignore();
+}
+
+void NativeEditorView::wheelEvent(QWheelEvent *event) {
+    if (event->modifiers() & Qt::ControlModifier) {
+        if (event->angleDelta().y() > 0) {
+            Theme::ThemeManager::instance().zoomIn();
+        } else if (event->angleDelta().y() < 0) {
+            Theme::ThemeManager::instance().zoomOut();
+        }
+        event->accept();
+        return;
+    }
+
+    int dy = 0;
+    if (!event->pixelDelta().isNull()) {
+        dy = event->pixelDelta().y();
+    } else if (!event->angleDelta().isNull()) {
+        // Standard mouse wheel notch: 120 units
+        int scrollLines = qMax(1, QApplication::wheelScrollLines());
+        double lineH = 26.0;
+        dy = static_cast<int>((event->angleDelta().y() / 120.0) * (scrollLines * lineH));
+    }
+
+    int dx = 0;
+    if (event->pixelDelta().x() != 0) {
+        dx = event->pixelDelta().x();
+    } else if (event->angleDelta().x() != 0) {
+        dx = static_cast<int>((event->angleDelta().x() / 120.0) * 40.0);
+    }
+
+    if (dy != 0) {
+        verticalScrollBar()->setValue(verticalScrollBar()->value() - dy);
+    }
+    if (dx != 0) {
+        horizontalScrollBar()->setValue(horizontalScrollBar()->value() - dx);
+    }
+
+    event->accept();
 }
 
 } // namespace MarkdownTool::Editor

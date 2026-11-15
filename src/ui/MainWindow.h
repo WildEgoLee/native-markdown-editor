@@ -74,10 +74,12 @@ private:
     QAction *m_tbUndo = nullptr;
     QAction *m_tbRedo = nullptr;
     QAction *m_tbFind = nullptr;
+    QAction *m_tbFont = nullptr;
     QAction *m_tbTheme = nullptr;
     QAction *m_tbMode = nullptr;
 
     void updateThemeStyles();
+    void showFontDialog();
 };
 
 } // namespace MarkdownTool::UI

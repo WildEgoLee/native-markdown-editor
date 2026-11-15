@@ -70,8 +70,10 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Set high quality system font
-    QFont defaultFont(QStringLiteral("Segoe UI"), 11);
+    // Set high quality system font with optimal Chinese / English glyph harmonization
+    QFont defaultFont;
+    defaultFont.setFamilies({QStringLiteral("Microsoft YaHei UI"), QStringLiteral("PingFang SC"), QStringLiteral("Segoe UI"), QStringLiteral("sans-serif")});
+    defaultFont.setPointSize(10);
     app.setFont(defaultFont);
 
     auto window = std::make_unique<MarkdownTool::UI::MainWindow>();

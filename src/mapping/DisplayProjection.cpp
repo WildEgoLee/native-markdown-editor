@@ -566,21 +566,23 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
     block.sourceRange = node->fullRange;
 
     QTextCharFormat baseFormat;
-    baseFormat.setFontFamilies({QStringLiteral("Segoe UI"), QStringLiteral("Microsoft YaHei UI"), QStringLiteral("-apple-system"), QStringLiteral("sans-serif")});
-    baseFormat.setFontPointSize(12);
+    baseFormat.setFontFamilies(Theme::ThemeManager::instance().proseFontFamilies());
+    qreal basePt = Theme::ThemeManager::instance().basePointSize();
+    baseFormat.setFontPointSize(basePt);
     baseFormat.setForeground(palette.primaryText);
 
     if (node->type == NodeType::Heading) {
         block.headingLevel = node->headingLevel;
         baseFormat.setFontWeight(QFont::Bold);
 
-        qreal pointSize = 12;
+        qreal scale = basePt / 12.0;
+        qreal pointSize = basePt;
         switch (node->headingLevel) {
-        case 1: pointSize = 24; block.marginTop = 28; block.marginBottom = 12; break;
-        case 2: pointSize = 20; block.marginTop = 22; block.marginBottom = 10; break;
-        case 3: pointSize = 16; block.marginTop = 16; block.marginBottom = 8; break;
-        case 4: pointSize = 14; block.marginTop = 14; block.marginBottom = 6; break;
-        default: pointSize = 12; block.marginTop = 10; block.marginBottom = 4; break;
+        case 1: pointSize = 24.0 * scale; block.marginTop = 28; block.marginBottom = 12; break;
+        case 2: pointSize = 20.0 * scale; block.marginTop = 22; block.marginBottom = 10; break;
+        case 3: pointSize = 16.0 * scale; block.marginTop = 16; block.marginBottom = 8; break;
+        case 4: pointSize = 14.0 * scale; block.marginTop = 14; block.marginBottom = 6; break;
+        default: pointSize = 12.0 * scale; block.marginTop = 10; block.marginBottom = 4; break;
         }
         baseFormat.setFontPointSize(pointSize);
 
@@ -690,7 +692,7 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
         }
 
         baseFormat.setFontFamilies({QStringLiteral("Cascadia Code"), QStringLiteral("Consolas"), QStringLiteral("Fira Code"), QStringLiteral("monospace")});
-        baseFormat.setFontPointSize(10.5);
+        baseFormat.setFontPointSize(10.5 * (basePt / 12.0));
         baseFormat.setForeground(palette.primaryText);
 
         VisualSegment codeSeg;
@@ -711,7 +713,7 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
         block.isInteractiveActive = isSourceMode || node->fullRange.contains(cursorPos);
 
         baseFormat.setFontFamilies({QStringLiteral("Cascadia Code"), QStringLiteral("Consolas"), QStringLiteral("Fira Code"), QStringLiteral("monospace")});
-        baseFormat.setFontPointSize(10.5);
+        baseFormat.setFontPointSize(10.5 * (basePt / 12.0));
         baseFormat.setForeground(palette.primaryText);
 
         VisualSegment mathSeg;
@@ -730,7 +732,7 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
         bool isActive = isSourceMode || node->fullRange.contains(cursorPos);
 
         baseFormat.setFontFamilies({QStringLiteral("Cascadia Code"), QStringLiteral("Consolas"), QStringLiteral("Segoe UI"), QStringLiteral("sans-serif")});
-        baseFormat.setFontPointSize(11);
+        baseFormat.setFontPointSize(11.0 * (basePt / 12.0));
 
         VisualSegment tableSeg;
         tableSeg.sourceRange = node->fullRange;

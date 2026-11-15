@@ -58,6 +58,28 @@ public:
     const ColorPalette &palette() const { return m_palette; }
 
     // Typography
+    enum class FontPreset {
+        SansSerif,  // 现代无衬线 (微软雅黑 / PingFang SC / Segoe UI)
+        Serif,      // 典雅书卷体 (宋体 / 思源宋体 / Georgia / Cambria)
+        Monospace,  // 极客编程等宽 (Cascadia Code / Consolas / JetBrains Mono)
+        Custom      // 用户自定义字体
+    };
+
+    FontPreset fontPreset() const { return m_fontPreset; }
+    void setFontPreset(FontPreset preset);
+
+    QString customFontFamily() const { return m_customFontFamily; }
+    void setCustomFontFamily(const QString &family);
+
+    QStringList proseFontFamilies() const;
+    QString currentFontDisplayName() const;
+
+    qreal basePointSize() const { return m_basePointSize; }
+    void setBasePointSize(qreal pt);
+    void zoomIn();
+    void zoomOut();
+    void resetZoom();
+
     QFont fontSans(int pointSize = 11, int weight = QFont::Normal) const;
     QFont fontMono(int pointSize = 10, int weight = QFont::Normal) const;
 
@@ -77,6 +99,7 @@ public:
 
 signals:
     void themeChanged(ThemeMode newMode);
+    void typographyChanged();
 
 private:
     ThemeManager();
@@ -84,6 +107,10 @@ private:
 
     ThemeMode m_mode = ThemeMode::Light;
     ColorPalette m_palette;
+
+    FontPreset m_fontPreset = FontPreset::SansSerif;
+    QString m_customFontFamily;
+    qreal m_basePointSize = 12.0;
 };
 
 inline const ColorPalette &currentPalette() {

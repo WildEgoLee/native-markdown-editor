@@ -87,6 +87,7 @@ private slots:
     void testRealGuiAsyncAutoRefreshAndInteractiveRegression();
     void testFileAndImageDragAndDrop();
     void testVisualRedesignScreenshotsAndThemes();
+    void testMouseWheelScrollingAndTypography();
 };
 
 // Probe 1: UTF-8 BOM, CRLF, trailing spaces, no-newline exact byte-for-byte invariance
@@ -3380,6 +3381,112 @@ void TestProbes::testVisualRedesignScreenshotsAndThemes() {
 
     // Restore to default Paper Light
     Theme::ThemeManager::instance().setMode(Theme::ThemeMode::Light);
+}
+
+// Probe 50: Mouse Wheel Natural Scrolling & Typography Customization (Presets, Custom Font, and Ctrl+Wheel Zoom)
+void TestProbes::testMouseWheelScrollingAndTypography() {
+    UI::MainWindow mainWindow;
+    mainWindow.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&mainWindow));
+
+    auto *editorView = mainWindow.editorView();
+    QVERIFY(editorView != nullptr);
+
+    // Populate document with 100 lines so scrolling range is significant
+    QString text;
+    for (int i = 1; i <= 100; ++i) {
+        text.append(QStringLiteral("### 行 %1: 测试滚轮自然平滑滚动与字体排版表现\n这是一段较长的测试文本，用于验证在各种字体与滚轮步长下的排版渲染。\n").arg(i));
+    }
+    editorView->buffer().setText(text);
+    editorView->reparseAndRelayout();
+    QTest::qWait(50);
+
+    auto *vBar = editorView->verticalScrollBar();
+    QVERIFY(vBar->maximum() > 500);
+    QCOMPARE(vBar->value(), 0);
+
+    // 1. Verify singleStep is responsive and >= 50px (not 1px)
+    QVERIFY(vBar->singleStep() >= 50);
+
+    // 2. Simulate standard mouse wheel scroll down (angleDelta y = -120, 1 notch)
+    QPoint pos(editorView->viewport()->width() / 2, editorView->viewport()->height() / 2);
+    QWheelEvent wheelDown(pos, editorView->viewport()->mapToGlobal(pos),
+                         QPoint(0, 0), QPoint(0, -120),
+                         Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+    QApplication::sendEvent(editorView->viewport(), &wheelDown);
+    QTest::qWait(20);
+
+    // Value must have scrolled down significantly (> 50px, typically ~78px for 3 lines)
+    int scrolledVal = vBar->value();
+    QVERIFY2(scrolledVal >= 50, qPrintable(QStringLiteral("Expected scrolled >= 50, actual: %1").arg(scrolledVal)));
+
+    // 3. Simulate mouse wheel scroll up (angleDelta y = +120, 1 notch)
+    QWheelEvent wheelUp(pos, editorView->viewport()->mapToGlobal(pos),
+                       QPoint(0, 0), QPoint(0, 120),
+                       Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+    QApplication::sendEvent(editorView->viewport(), &wheelUp);
+    QTest::qWait(20);
+    QCOMPARE(vBar->value(), 0);
+
+    // 4. Simulate trackpad high-precision pixelDelta scrolling
+    QWheelEvent trackpadScroll(pos, editorView->viewport()->mapToGlobal(pos),
+                              QPoint(0, -35), QPoint(0, -35),
+                              Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+    QApplication::sendEvent(editorView->viewport(), &trackpadScroll);
+    QTest::qWait(20);
+    QCOMPARE(vBar->value(), 35);
+
+    // Reset scrollbar
+    vBar->setValue(0);
+
+    // 5. Test Typography Presets
+    auto &themeMgr = Theme::ThemeManager::instance();
+    // Default preset
+    QCOMPARE(themeMgr.fontPreset(), Theme::ThemeManager::FontPreset::SansSerif);
+    QVERIFY(themeMgr.proseFontFamilies().contains(QStringLiteral("Microsoft YaHei UI")));
+
+    // Switch to Serif Preset (典雅书卷体)
+    themeMgr.setFontPreset(Theme::ThemeManager::FontPreset::Serif);
+    QTest::qWait(50);
+    QCOMPARE(themeMgr.fontPreset(), Theme::ThemeManager::FontPreset::Serif);
+    QVERIFY(themeMgr.proseFontFamilies().contains(QStringLiteral("SimSun")) ||
+            themeMgr.proseFontFamilies().contains(QStringLiteral("Noto Serif SC")));
+
+    // Switch to Monospace Preset (极客等宽体)
+    themeMgr.setFontPreset(Theme::ThemeManager::FontPreset::Monospace);
+    QTest::qWait(50);
+    QCOMPARE(themeMgr.fontPreset(), Theme::ThemeManager::FontPreset::Monospace);
+    QVERIFY(themeMgr.proseFontFamilies().contains(QStringLiteral("Cascadia Code")));
+
+    // Set Custom Font
+    themeMgr.setCustomFontFamily(QStringLiteral("CustomTestFont"));
+    QTest::qWait(50);
+    QCOMPARE(themeMgr.fontPreset(), Theme::ThemeManager::FontPreset::Custom);
+    QCOMPARE(themeMgr.proseFontFamilies().first(), QStringLiteral("CustomTestFont"));
+
+    // 6. Test Font Zoom (Ctrl + Wheel)
+    themeMgr.resetZoom();
+    QCOMPARE(themeMgr.basePointSize(), 12.0);
+
+    // Zoom in with Ctrl + Wheel
+    QWheelEvent zoomInWheel(pos, editorView->viewport()->mapToGlobal(pos),
+                           QPoint(0, 0), QPoint(0, 120),
+                           Qt::NoButton, Qt::ControlModifier, Qt::NoScrollPhase, false);
+    QApplication::sendEvent(editorView->viewport(), &zoomInWheel);
+    QTest::qWait(20);
+    QCOMPARE(themeMgr.basePointSize(), 13.0);
+
+    // Zoom out with Ctrl + Wheel
+    QWheelEvent zoomOutWheel(pos, editorView->viewport()->mapToGlobal(pos),
+                            QPoint(0, 0), QPoint(0, -120),
+                            Qt::NoButton, Qt::ControlModifier, Qt::NoScrollPhase, false);
+    QApplication::sendEvent(editorView->viewport(), &zoomOutWheel);
+    QTest::qWait(20);
+    QCOMPARE(themeMgr.basePointSize(), 12.0);
+
+    // Restore to SansSerif default
+    themeMgr.setFontPreset(Theme::ThemeManager::FontPreset::SansSerif);
+    themeMgr.resetZoom();
 }
 
 QTEST_MAIN(TestProbes)

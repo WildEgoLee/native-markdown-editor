@@ -8,6 +8,7 @@
 
 #include <QAbstractScrollArea>
 #include <QTimer>
+#include <QWheelEvent>
 #include <QInputMethodEvent>
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
@@ -96,6 +97,7 @@ protected:
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dragMoveEvent(QDragMoveEvent *event) override;
     void dropEvent(QDropEvent *event) override;
+    void wheelEvent(QWheelEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;

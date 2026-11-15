@@ -86,9 +86,96 @@ void ThemeManager::updatePalette() {
     }
 }
 
+void ThemeManager::setFontPreset(FontPreset preset) {
+    if (m_fontPreset != preset) {
+        m_fontPreset = preset;
+        emit typographyChanged();
+    }
+}
+
+void ThemeManager::setCustomFontFamily(const QString &family) {
+    m_fontPreset = FontPreset::Custom;
+    m_customFontFamily = family;
+    emit typographyChanged();
+}
+
+QStringList ThemeManager::proseFontFamilies() const {
+    switch (m_fontPreset) {
+    case FontPreset::Serif:
+        return {
+            QStringLiteral("Noto Serif SC"),
+            QStringLiteral("Source Han Serif SC"),
+            QStringLiteral("STSong"),
+            QStringLiteral("SimSun"),
+            QStringLiteral("Georgia"),
+            QStringLiteral("Cambria"),
+            QStringLiteral("serif")
+        };
+    case FontPreset::Monospace:
+        return {
+            QStringLiteral("Cascadia Code"),
+            QStringLiteral("Consolas"),
+            QStringLiteral("JetBrains Mono"),
+            QStringLiteral("Fira Code"),
+            QStringLiteral("Courier New"),
+            QStringLiteral("monospace")
+        };
+    case FontPreset::Custom:
+        if (!m_customFontFamily.isEmpty()) {
+            return {
+                m_customFontFamily,
+                QStringLiteral("Microsoft YaHei UI"),
+                QStringLiteral("sans-serif")
+            };
+        }
+        [[fallthrough]];
+    case FontPreset::SansSerif:
+    default:
+        return {
+            QStringLiteral("Microsoft YaHei UI"),
+            QStringLiteral("Microsoft YaHei"),
+            QStringLiteral("PingFang SC"),
+            QStringLiteral("Segoe UI"),
+            QStringLiteral("HarmonyOS Sans SC"),
+            QStringLiteral("Noto Sans SC"),
+            QStringLiteral("sans-serif")
+        };
+    }
+}
+
+QString ThemeManager::currentFontDisplayName() const {
+    switch (m_fontPreset) {
+    case FontPreset::SansSerif: return QStringLiteral("现代无衬线 (微软雅黑)");
+    case FontPreset::Serif:     return QStringLiteral("典雅书卷体 (宋体)");
+    case FontPreset::Monospace: return QStringLiteral("极客等宽体 (Cascadia Code)");
+    case FontPreset::Custom:    return m_customFontFamily.isEmpty() ? QStringLiteral("自定义字体") : m_customFontFamily;
+    }
+    return QStringLiteral("现代无衬线");
+}
+
+void ThemeManager::setBasePointSize(qreal pt) {
+    qreal clamped = std::clamp(pt, 8.0, 36.0);
+    if (std::abs(m_basePointSize - clamped) > 0.01) {
+        m_basePointSize = clamped;
+        emit typographyChanged();
+    }
+}
+
+void ThemeManager::zoomIn() {
+    setBasePointSize(m_basePointSize + 1.0);
+}
+
+void ThemeManager::zoomOut() {
+    setBasePointSize(m_basePointSize - 1.0);
+}
+
+void ThemeManager::resetZoom() {
+    setBasePointSize(12.0);
+}
+
 QFont ThemeManager::fontSans(int pointSize, int weight) const {
     QFont f;
-    f.setFamilies({QStringLiteral("Segoe UI"), QStringLiteral("Microsoft YaHei UI"), QStringLiteral("-apple-system"), QStringLiteral("sans-serif")});
+    f.setFamilies(proseFontFamilies());
     f.setPointSize(pointSize);
     f.setWeight(static_cast<QFont::Weight>(weight));
     return f;
@@ -96,7 +183,7 @@ QFont ThemeManager::fontSans(int pointSize, int weight) const {
 
 QFont ThemeManager::fontMono(int pointSize, int weight) const {
     QFont f;
-    f.setFamilies({QStringLiteral("Cascadia Code"), QStringLiteral("Consolas"), QStringLiteral("Fira Code"), QStringLiteral("monospace")});
+    f.setFamilies({QStringLiteral("Cascadia Code"), QStringLiteral("Consolas"), QStringLiteral("JetBrains Mono"), QStringLiteral("Fira Code"), QStringLiteral("monospace")});
     f.setPointSize(pointSize);
     f.setWeight(static_cast<QFont::Weight>(weight));
     return f;
@@ -522,6 +609,11 @@ QIcon ThemeManager::icon(const QString &name, int size, const QColor &customColo
         svg = QStringLiteral(R"(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="%1" height="%1" fill="none" stroke="%2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="11" cy="11" r="8"/>
             <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>)").arg(size).arg(colStr);
+    } else if (name == QStringLiteral("font")) {
+        svg = QStringLiteral(R"(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="%1" height="%1" fill="none" stroke="%2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="4 20 12 4 20 20"/>
+            <line x1="6.8" y1="14" x2="17.2" y2="14"/>
         </svg>)").arg(size).arg(colStr);
     } else {
         svg = QStringLiteral(R"(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="%1" height="%1" fill="none" stroke="%2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

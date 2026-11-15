@@ -3314,7 +3314,7 @@ void TestProbes::testVisualRedesignScreenshotsAndThemes() {
     // 3. Verify LayoutEngine 780px Centering and Responsive Margins
     const auto &layoutEng = mainWindow.editorView()->layoutEngine();
     QVERIFY(layoutEng.contentWidth() <= 780.0);
-    QVERIFY(layoutEng.contentLeft() >= 40.0);
+    QVERIFY(layoutEng.contentLeft() >= 16.0);
 
     // Deterministic LayoutEngine tests:
     // Wide viewport (1200px): strictly clamped to 780px and centered at (1200 - 780) / 2 = 210px

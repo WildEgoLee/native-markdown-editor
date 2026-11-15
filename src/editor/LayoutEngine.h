@@ -15,6 +15,7 @@ namespace MarkdownTool::Editor {
 struct TableCellLayout {
     QRectF rect;
     std::shared_ptr<QTextLayout> layout;
+    QString text;
     Core::SourceRange sourceRange;
     int visualStart = 0;
     int visualLength = 0;
@@ -97,6 +98,10 @@ public:
     const QVector<BlockLayoutData> &blocks() const { return m_blocks; }
     void invalidateLayout();
 
+    static bool isBlockLayoutEqual(const Mapping::VisualBlock &vBlock,
+                                   const BlockLayoutData &prevData,
+                                   bool hasImeHere = false);
+
 private:
     void layoutSingleBlock(const Mapping::VisualBlock &vBlock,
                            int blockIndex,
@@ -108,10 +113,6 @@ private:
                     const Mapping::VisualBlock &vBlock,
                     int blockIndex,
                     qreal &currentY);
-
-    static bool isBlockLayoutEqual(const Mapping::VisualBlock &vBlock,
-                                   const BlockLayoutData &prevData,
-                                   bool hasImeHere);
 
     QVector<BlockLayoutData> m_blocks;
     qreal m_totalHeight = 0;

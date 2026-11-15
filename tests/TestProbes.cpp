@@ -105,6 +105,10 @@ private slots:
     void testAdaptiveReadingWidthAndTypographyReflow();
     void testMarkdownTableNativeLayoutAndInteraction();
     void testCtrlWheelZoomStabilityAndBoundaryChecks();
+    void testTableIncrementalSourceRangeSynchronization();
+    void testTableLayoutCacheInvalidationOnStructureChange();
+    void testWideTableGeometryAndNonClipping();
+    void testNinjaDependencyTrackingIntegrity();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempSettingsDir;
@@ -4490,6 +4494,186 @@ void TestProbes::testCtrlWheelZoomStabilityAndBoundaryChecks() {
     QVERIFY(emptyCRect.isValid());
     int emptyHit = emptyEngine.hitTest(QPointF(10.0, 10.0), emptyProj);
     QCOMPARE(emptyHit, 0);
+}
+
+void TestProbes::testTableIncrementalSourceRangeSynchronization() {
+    Parser::MarkdownParserAdapter parser;
+    Core::TextBuffer buffer;
+    buffer.setText(QStringLiteral(
+        "前置普通段落内容。\n\n"
+        "| 姓名 | 年龄 | 城市 |\n"
+        "| :--- | :---: | ---: |\n"
+        "| 张三 | 25 | 北京 |\n"
+        "| 李四 | 30 | 上海 |\n"
+    ));
+
+    auto root = parser.parse(buffer);
+    QVERIFY(root != nullptr);
+
+    Mapping::DisplayProjection projection;
+    projection.buildProjection(root, buffer, 0, false);
+    QCOMPARE(projection.blockCount(), 2);
+
+    const auto &tableBlockBefore = projection.blocks()[1];
+    QVERIFY(tableBlockBefore.isTableBlock);
+    int initialTableStart = tableBlockBefore.sourceRange.start;
+    int initialRow1Start = tableBlockBefore.tableData.rows[1].sourceRange.start;
+    int initialCellStart = tableBlockBefore.tableData.rows[1].cells[2].sourceRange.start;
+    QString cellText = tableBlockBefore.tableData.rows[1].cells[2].text;
+    QCOMPARE(cellText, QStringLiteral("北京"));
+
+    // Insert 6 characters into paragraph 0 at offset 2
+    QString insertStr = QStringLiteral("【更新】");
+    int insertOffset = 2;
+    int insertLen = insertStr.length();
+    buffer.replace(insertOffset, 0, insertStr);
+
+    int childIdx = -1;
+    bool canInc = parser.canIncrementalParse(root, buffer, insertOffset, 0, insertLen, childIdx);
+    QVERIFY(canInc);
+    bool incSuccess = false;
+    auto incRoot = parser.incrementalParse(root, buffer, insertOffset, 0, insertLen, childIdx, &incSuccess);
+    QVERIFY(incSuccess);
+
+    // Incremental projection update with shift
+    bool changed = projection.buildProjection(incRoot, buffer, insertOffset + insertLen, false, insertOffset, 0, insertLen);
+    QVERIFY(changed);
+
+    const auto &tableBlockAfter = projection.blocks()[1];
+    QVERIFY(tableBlockAfter.isTableBlock);
+    QCOMPARE(tableBlockAfter.sourceRange.start, initialTableStart + insertLen);
+    QCOMPARE(tableBlockAfter.tableData.sourceRange.start, initialTableStart + insertLen);
+    QCOMPARE(tableBlockAfter.tableData.rows[1].sourceRange.start, initialRow1Start + insertLen);
+    QCOMPARE(tableBlockAfter.tableData.rows[1].cells[2].sourceRange.start, initialCellStart + insertLen);
+
+    // Verify LayoutEngine cursorRect and hitTest after shift
+    Editor::LayoutEngine engine;
+    engine.layout(projection, 800.0);
+    int newCellStart = initialCellStart + insertLen;
+    QRectF cRect = engine.cursorRect(newCellStart, projection);
+    QVERIFY(cRect.isValid());
+
+    const auto &layoutCell = engine.blocks()[1].tableLayout.rows[1].cells[2];
+    QVERIFY(cRect.left() >= layoutCell.rect.left() - 1.0);
+    QVERIFY(cRect.right() <= layoutCell.rect.right() + 1.0);
+    QVERIFY(cRect.top() >= layoutCell.rect.top() - 1.0);
+    QVERIFY(cRect.bottom() <= layoutCell.rect.bottom() + 1.0);
+
+    int hitOffset = engine.hitTest(layoutCell.rect.center(), projection);
+    QVERIFY(hitOffset >= layoutCell.sourceRange.start && hitOffset <= layoutCell.sourceRange.end);
+
+    // Cold projection must be 100% identical to incremental projection
+    auto coldRoot = parser.parse(buffer);
+    Mapping::DisplayProjection coldProj;
+    coldProj.buildProjection(coldRoot, buffer, insertOffset + insertLen, false);
+    assertVisualBlocksDeepEqual(projection.blocks(), coldProj.blocks());
+}
+
+void TestProbes::testTableLayoutCacheInvalidationOnStructureChange() {
+    Parser::MarkdownParserAdapter parser;
+    Core::TextBuffer buffer;
+    buffer.setText(QStringLiteral(
+        "| 姓名 | 年龄 |\n"
+        "| :--- | :--- |\n"
+        "| 张三 | 25 |\n"
+    ));
+
+    auto root = parser.parse(buffer);
+    Mapping::DisplayProjection proj1;
+    proj1.buildProjection(root, buffer, 0, false);
+
+    Editor::LayoutEngine engine;
+    engine.layout(proj1, 800.0);
+    QCOMPARE(engine.blocks().size(), 1);
+    QCOMPARE(engine.blocks()[0].tableLayout.rows[0].cells[0].alignment, Qt::AlignLeft);
+
+    // 1. Change alignment from Left to Right (:--- -> ---:)
+    buffer.replace(0, buffer.length(), QStringLiteral(
+        "| 姓名 | 年龄 |\n"
+        "| ---: | :--- |\n"
+        "| 张三 | 25 |\n"
+    ));
+    auto root2 = parser.parse(buffer);
+    Mapping::DisplayProjection proj2;
+    proj2.buildProjection(root2, buffer, 0, false);
+
+    // isBlockLayoutEqual must return false!
+    bool isEqual = Editor::LayoutEngine::isBlockLayoutEqual(proj2.blocks()[0], engine.blocks()[0]);
+    QCOMPARE(isEqual, false);
+
+    engine.layout(proj2, 800.0);
+    QCOMPARE(engine.blocks()[0].tableLayout.rows[0].cells[0].alignment, Qt::AlignRight);
+
+    // 2. Change cell content ("张三" -> "诸葛孔明")
+    buffer.replace(0, buffer.length(), QStringLiteral(
+        "| 姓名 | 年龄 |\n"
+        "| ---: | :--- |\n"
+        "| 诸葛孔明 | 25 |\n"
+    ));
+    auto root3 = parser.parse(buffer);
+    Mapping::DisplayProjection proj3;
+    proj3.buildProjection(root3, buffer, 0, false);
+
+    bool isEqualContent = Editor::LayoutEngine::isBlockLayoutEqual(proj3.blocks()[0], engine.blocks()[0]);
+    QCOMPARE(isEqualContent, false);
+
+    engine.layout(proj3, 800.0);
+    QCOMPARE(engine.blocks()[0].tableLayout.rows[1].cells[0].text, QStringLiteral("诸葛孔明"));
+}
+
+void TestProbes::testWideTableGeometryAndNonClipping() {
+    Parser::MarkdownParserAdapter parser;
+    Core::TextBuffer buffer;
+    QString wideMd = QStringLiteral(
+        "| C1 | C2 | C3 | C4 | C5 | C6 | C7 | C8 | C9 | C10 |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| V1 | V2 | V3 | V4 | V5 | V6 | V7 | V8 | V9 | V10 |\n"
+    );
+    buffer.setText(wideMd);
+
+    auto root = parser.parse(buffer);
+    Mapping::DisplayProjection proj;
+    proj.buildProjection(root, buffer, 0, false);
+
+    Editor::LayoutEngine engine;
+    const qreal smallContentWidth = 400.0;
+    engine.layout(proj, smallContentWidth);
+
+    const auto &bData = engine.blocks()[0];
+    QVERIFY(bData.isTableBlock);
+    QCOMPARE(bData.tableLayout.colCount, 10);
+
+    // 10 columns * 60px minimum = at least 600px!
+    qreal sumColW = 0.0;
+    for (qreal w : bData.tableLayout.colWidths) sumColW += w;
+    QVERIFY(sumColW >= 600.0);
+
+    // Block rectangle width must accommodate full table without truncation
+    QVERIFY(bData.rect.width() >= sumColW);
+    QVERIFY(bData.tableLayout.tableRect.width() >= sumColW);
+
+    for (const auto &row : bData.tableLayout.rows) {
+        QVERIFY(row.rect.width() >= sumColW);
+        for (const auto &cell : row.cells) {
+            QVERIFY(cell.rect.isValid());
+            QVERIFY(cell.rect.right() <= bData.rect.right() + 0.1);
+        }
+    }
+}
+
+void TestProbes::testNinjaDependencyTrackingIntegrity() {
+    // Read rules.ninja to verify msvc_deps_prefix is cleanly decoded without mojibake
+    QFile rulesFile(QStringLiteral("CMakeFiles/rules.ninja"));
+    if (!rulesFile.exists()) {
+        rulesFile.setFileName(QStringLiteral("build/CMakeFiles/rules.ninja"));
+    }
+    if (rulesFile.open(QIODevice::ReadOnly)) {
+        QByteArray content = rulesFile.readAll();
+        // Mojibake character '娉' (UTF-8 0xE5 0xA8 0x89) must NOT exist
+        QVERIFY(!content.contains("\xE5\xA8\x89"));
+        QVERIFY(!content.contains("娉ㄦ剰"));
+        rulesFile.close();
+    }
 }
 
 QTEST_MAIN(TestProbes)

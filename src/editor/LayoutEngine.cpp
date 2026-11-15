@@ -132,6 +132,7 @@ void LayoutEngine::layoutSingleBlock(const Mapping::VisualBlock &vBlock,
 
                 cellLayout.layout = std::make_shared<QTextLayout>();
                 QString text = (c < vRow.cells.size()) ? vRow.cells[c].text : QString();
+                cellLayout.text = text;
                 cellLayout.layout->setText(text);
                 cellLayout.layout->setFont(vRow.isHeader ? headerFont : normalFont);
 
@@ -158,7 +159,11 @@ void LayoutEngine::layoutSingleBlock(const Mapping::VisualBlock &vBlock,
                 rowLayout.cells.append(std::move(cellLayout));
             }
 
-            rowLayout.rect = QRectF(m_contentLeft, rowY, m_contentWidth, maxRowH);
+            qreal totalTableW = 0.0;
+            for (qreal w : colWidths) totalTableW += w;
+            qreal actualTableW = qMax(m_contentWidth, totalTableW);
+
+            rowLayout.rect = QRectF(m_contentLeft, rowY, actualTableW, maxRowH);
             for (int c = 0; c < rowLayout.cells.size(); ++c) {
                 qreal cellX = m_contentLeft;
                 for (int i = 0; i < c; ++i) cellX += colWidths[i];
@@ -170,7 +175,10 @@ void LayoutEngine::layoutSingleBlock(const Mapping::VisualBlock &vBlock,
         }
 
         qreal totalTableH = rowY - currentY;
-        bData.rect = QRectF(m_contentLeft, currentY, m_contentWidth, totalTableH);
+        qreal totalTableW = 0.0;
+        for (qreal w : colWidths) totalTableW += w;
+        qreal actualTableW = qMax(m_contentWidth, totalTableW);
+        bData.rect = QRectF(m_contentLeft, currentY, actualTableW, totalTableH);
         bData.tableLayout.tableRect = bData.rect;
         currentY += totalTableH + vBlock.marginBottom;
 
@@ -326,11 +334,19 @@ void LayoutEngine::reuseBlock(const BlockLayoutData &src,
         bData.embeddedPreviewRect = QRectF(m_contentLeft, currentY + (src.embeddedPreviewRect.top() - src.rect.top()), m_contentWidth, src.embeddedPreviewRect.height());
     }
     if (bData.isTableBlock) {
+        bData.rect = src.rect;
+        bData.rect.moveTop(currentY);
         bData.tableLayout.tableRect = bData.rect;
-        for (auto &row : bData.tableLayout.rows) {
+        const auto &tData = vBlock.tableData;
+        for (int r = 0; r < bData.tableLayout.rows.size(); ++r) {
+            auto &row = bData.tableLayout.rows[r];
             row.rect.translate(0, dy);
-            for (auto &cell : row.cells) {
+            for (int c = 0; c < row.cells.size(); ++c) {
+                auto &cell = row.cells[c];
                 cell.rect.translate(0, dy);
+                if (r < tData.rows.size() && c < tData.rows[r].cells.size()) {
+                    cell.sourceRange = tData.rows[r].cells[c].sourceRange;
+                }
             }
         }
     }
@@ -353,6 +369,31 @@ bool LayoutEngine::isBlockLayoutEqual(const Mapping::VisualBlock &vBlock,
         prevData.embeddedSource != vBlock.embeddedSource)
     {
         return false;
+    }
+    if (vBlock.isTableBlock) {
+        const auto &tData = vBlock.tableData;
+        const auto &tLayout = prevData.tableLayout;
+        if (tLayout.colCount != tData.colCount ||
+            tLayout.rows.size() != tData.rows.size()) {
+            return false;
+        }
+        for (int r = 0; r < tData.rows.size(); ++r) {
+            const auto &tRow = tData.rows[r];
+            const auto &lRow = tLayout.rows[r];
+            if (lRow.isHeader != tRow.isHeader ||
+                lRow.cells.size() != tRow.cells.size()) {
+                return false;
+            }
+            for (int c = 0; c < tRow.cells.size(); ++c) {
+                const auto &tCell = tRow.cells[c];
+                const auto &lCell = lRow.cells[c];
+                if (lCell.alignment != tCell.alignment ||
+                    lCell.sourceRange != tCell.sourceRange ||
+                    lCell.text != tCell.text) {
+                    return false;
+                }
+            }
+        }
     }
     if (!prevData.layout && (!prevData.isMathBlock && !prevData.isMermaidBlock && !prevData.isTableBlock)) {
         return false;
@@ -542,7 +583,8 @@ int LayoutEngine::hitTest(const QPointF &point, const Mapping::DisplayProjection
                                 line = cell.layout->lineAt(0);
                             }
                             int cursorOffset = line.xToCursor(relX);
-                            return qBound(cell.sourceRange.start, cell.sourceRange.start + cursorOffset, cell.sourceRange.end);
+                            cursorOffset = qBound(0, cursorOffset, cell.sourceRange.length());
+                            return cell.sourceRange.start + cursorOffset;
                         }
                         return cell.sourceRange.start;
                     }
@@ -604,6 +646,7 @@ QRectF LayoutEngine::cursorRect(int sourceOffset, const Mapping::DisplayProjecti
                         qreal cellContentH = cell.layout->boundingRect().height();
                         qreal textY = cell.rect.top() + (cell.rect.height() - cellContentH) / 2.0;
                         int relOffset = sourceOffset - cell.sourceRange.start;
+                        relOffset = qBound(0, relOffset, cell.layout->text().length());
                         QTextLine line = cell.layout->lineForTextPosition(relOffset);
                         if (!line.isValid()) {
                             line = cell.layout->lineAt(0);
@@ -678,6 +721,9 @@ void LayoutEngine::paint(QPainter *painter,
             break; // Past the visible viewport, stop rendering!
         }
 
+        if (bData.visualBlockIndex < 0 || bData.visualBlockIndex >= vBlocks.size()) {
+            continue;
+        }
         const auto &vBlock = vBlocks[bData.visualBlockIndex];
 
         // Draw Math or Mermaid Embedded Component

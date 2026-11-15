@@ -6,8 +6,21 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(MSVC)
     add_compile_options(/utf-8 /wd4819)
-    # Ensure Ninja correctly captures /showIncludes header dependencies under localized MSVC
-    set(CMAKE_CL_SHOWINCLUDES_PREFIX "注意: 包含文件:  " CACHE INTERNAL "ShowIncludes prefix")
+    # Dynamically detect exact /showIncludes prefix in UTF-8 across Chinese/English/localized MSVC
+    if(CMAKE_GENERATOR MATCHES "Ninja")
+        file(WRITE "${CMAKE_BINARY_DIR}/CMakeFiles/showinc_detect.h" "")
+        file(WRITE "${CMAKE_BINARY_DIR}/CMakeFiles/showinc_detect.c" "#include \"showinc_detect.h\"\n")
+        execute_process(
+            COMMAND "${CMAKE_C_COMPILER}" /nologo /showIncludes /c "${CMAKE_BINARY_DIR}/CMakeFiles/showinc_detect.c"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/CMakeFiles"
+            OUTPUT_VARIABLE _showinc_out
+            ERROR_VARIABLE _showinc_out
+            ENCODING UTF-8
+        )
+        if(_showinc_out MATCHES "([^\r\n]+)[ ]+.*showinc_detect\\.h")
+            set(CMAKE_CL_SHOWINCLUDES_PREFIX "${CMAKE_MATCH_1} " CACHE INTERNAL "ShowIncludes prefix" FORCE)
+        endif()
+    endif()
 endif()
 
 set(CMAKE_AUTOMOC ON)

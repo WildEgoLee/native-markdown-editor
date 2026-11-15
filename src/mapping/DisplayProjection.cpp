@@ -395,6 +395,24 @@ bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
                                         b.checkboxSourceRange.start += delta;
                                         b.checkboxSourceRange.end += delta;
                                     }
+                                    if (b.isTableBlock) {
+                                        if (b.tableData.sourceRange.isValid()) {
+                                            b.tableData.sourceRange.start += delta;
+                                            b.tableData.sourceRange.end += delta;
+                                        }
+                                        for (auto &row : b.tableData.rows) {
+                                            if (row.sourceRange.isValid()) {
+                                                row.sourceRange.start += delta;
+                                                row.sourceRange.end += delta;
+                                            }
+                                            for (auto &cell : row.cells) {
+                                                if (cell.sourceRange.isValid()) {
+                                                    cell.sourceRange.start += delta;
+                                                    cell.sourceRange.end += delta;
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
 
@@ -797,7 +815,15 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
                 if (cellChild->type != NodeType::TableCell) continue;
 
                 TableCellVisual cellVis;
-                cellVis.sourceRange = cellChild->fullRange;
+                int cellStart = cellChild->fullRange.start;
+                int cellEnd = cellChild->fullRange.end;
+                while (cellStart < cellEnd && fullText.at(cellStart).isSpace()) {
+                    cellStart++;
+                }
+                while (cellEnd > cellStart && fullText.at(cellEnd - 1).isSpace()) {
+                    cellEnd--;
+                }
+                cellVis.sourceRange = Core::SourceRange(cellStart, cellEnd);
                 cellVis.isHeader = rowVis.isHeader;
                 if (colIndex < block.tableData.alignments.size()) {
                     cellVis.alignment = block.tableData.alignments[colIndex];

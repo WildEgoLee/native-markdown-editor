@@ -2,6 +2,7 @@
 
 #include "core/EditTransaction.h"
 #include "mapping/DisplayProjection.h"
+#include "theme/Theme.h"
 
 #include <QTextLayout>
 #include <QVector>
@@ -47,6 +48,8 @@ public:
                 const QString &preeditString = QString());
 
     qreal totalHeight() const { return m_totalHeight; }
+    qreal contentLeft() const { return m_contentLeft; }
+    qreal contentWidth() const { return m_contentWidth; }
 
     int hitTest(const QPointF &point, const Mapping::DisplayProjection &projection) const;
     QRectF cursorRect(int sourceOffset, const Mapping::DisplayProjection &projection) const;
@@ -69,7 +72,6 @@ public:
 private:
     void layoutSingleBlock(const Mapping::VisualBlock &vBlock,
                            int blockIndex,
-                           qreal contentWidth,
                            qreal &currentY,
                            int preeditOffset,
                            const QString &preeditString);
@@ -77,7 +79,6 @@ private:
     void reuseBlock(const BlockLayoutData &src,
                     const Mapping::VisualBlock &vBlock,
                     int blockIndex,
-                    qreal contentWidth,
                     qreal &currentY);
 
     static bool isBlockLayoutEqual(const Mapping::VisualBlock &vBlock,
@@ -87,6 +88,8 @@ private:
     QVector<BlockLayoutData> m_blocks;
     qreal m_totalHeight = 0;
     qreal m_lastWidth = 0;
+    qreal m_contentLeft = 20.0;
+    qreal m_contentWidth = 780.0;
 };
 
 } // namespace MarkdownTool::Editor

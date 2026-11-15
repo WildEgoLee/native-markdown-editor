@@ -66,6 +66,18 @@ private:
     File::DocumentSession m_session;
     QTimer *m_recoveryTimer = nullptr;
     QTimer *m_outlineDebounceTimer = nullptr;
+
+    QAction *m_tbSidebar = nullptr;
+    QAction *m_tbNew = nullptr;
+    QAction *m_tbOpen = nullptr;
+    QAction *m_tbSave = nullptr;
+    QAction *m_tbUndo = nullptr;
+    QAction *m_tbRedo = nullptr;
+    QAction *m_tbFind = nullptr;
+    QAction *m_tbTheme = nullptr;
+    QAction *m_tbMode = nullptr;
+
+    void updateThemeStyles();
 };
 
 } // namespace MarkdownTool::UI

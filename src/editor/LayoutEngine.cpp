@@ -14,7 +14,6 @@ LayoutEngine::~LayoutEngine() = default;
 
 void LayoutEngine::layoutSingleBlock(const Mapping::VisualBlock &vBlock,
                                      int blockIndex,
-                                     qreal contentWidth,
                                      qreal &currentY,
                                      int preeditOffset,
                                      const QString &preeditString)
@@ -35,7 +34,7 @@ void LayoutEngine::layoutSingleBlock(const Mapping::VisualBlock &vBlock,
         } else {
             cardH = std::max(70.0, static_cast<qreal>(Render::MathSvgRenderer::estimateSize(vBlock.embeddedSource).height() + 24.0));
         }
-        bData.rect = QRectF(20.0, currentY, contentWidth - 40.0, cardH);
+        bData.rect = QRectF(m_contentLeft, currentY, m_contentWidth, cardH);
         bData.embeddedPreviewRect = bData.rect;
         currentY += cardH + vBlock.marginBottom;
 
@@ -81,7 +80,7 @@ void LayoutEngine::layoutSingleBlock(const Mapping::VisualBlock &vBlock,
         imeFr.start = imeInsertPos;
         imeFr.length = preeditString.length();
         imeFr.format.setFontUnderline(true);
-        imeFr.format.setForeground(QColor(50, 130, 240));
+        imeFr.format.setForeground(Theme::currentPalette().accent);
         formats.append(imeFr);
     } else {
         // Apply normal format ranges
@@ -105,9 +104,9 @@ void LayoutEngine::layoutSingleBlock(const Mapping::VisualBlock &vBlock,
 
     qreal indent = vBlock.indentLevel * 24.0;
     if (vBlock.isQuote) {
-        indent += 16.0;
+        indent += 18.0;
     }
-    qreal blockContentWidth = qMax(100.0, contentWidth - indent - 40.0); // 40 = margins
+    qreal blockContentWidth = qMax(80.0, m_contentWidth - indent - 8.0);
 
     currentY += vBlock.marginTop;
 
@@ -138,7 +137,7 @@ void LayoutEngine::layoutSingleBlock(const Mapping::VisualBlock &vBlock,
     }
 
     qreal totalBlockH = y + (previewH > 0 ? (previewH + 12.0) : 0.0);
-    bData.rect = QRectF(20.0, currentY, contentWidth - 40.0, totalBlockH);
+    bData.rect = QRectF(m_contentLeft, currentY, m_contentWidth, totalBlockH);
     if (previewH > 0) {
         bData.embeddedPreviewRect = QRectF(bData.rect.left(), bData.rect.top() + y + 8.0, bData.rect.width(), previewH);
     }
@@ -161,7 +160,6 @@ void LayoutEngine::layoutSingleBlock(const Mapping::VisualBlock &vBlock,
 void LayoutEngine::reuseBlock(const BlockLayoutData &src,
                               const Mapping::VisualBlock &vBlock,
                               int blockIndex,
-                              qreal contentWidth,
                               qreal &currentY)
 {
     BlockLayoutData bData;
@@ -184,9 +182,9 @@ void LayoutEngine::reuseBlock(const BlockLayoutData &src,
 
     currentY += vBlock.marginTop;
     qreal h = src.rect.height();
-    bData.rect = QRectF(20.0, currentY, contentWidth - 40.0, h);
+    bData.rect = QRectF(m_contentLeft, currentY, m_contentWidth, h);
     if (!src.embeddedPreviewRect.isEmpty()) {
-        bData.embeddedPreviewRect = QRectF(20.0, currentY + (src.embeddedPreviewRect.top() - src.rect.top()), contentWidth - 40.0, src.embeddedPreviewRect.height());
+        bData.embeddedPreviewRect = QRectF(m_contentLeft, currentY + (src.embeddedPreviewRect.top() - src.rect.top()), m_contentWidth, src.embeddedPreviewRect.height());
     }
     currentY += h + vBlock.marginBottom;
 
@@ -254,6 +252,17 @@ void LayoutEngine::layout(const Mapping::DisplayProjection &projection,
     bool canReuse = (m_lastWidth > 0 && contentWidth == m_lastWidth && !m_blocks.isEmpty());
     m_lastWidth = contentWidth;
 
+    qreal maxW = Theme::ThemeManager::maxReadingWidth();
+    qreal sidePad = Theme::ThemeManager::sideMarginMin();
+
+    if (contentWidth > maxW + sidePad * 2.0) {
+        m_contentWidth = maxW;
+        m_contentLeft = (contentWidth - maxW) / 2.0;
+    } else {
+        m_contentLeft = qMax(16.0, qMin(24.0, (contentWidth - 100.0) / 2.0));
+        m_contentWidth = qMax(100.0, contentWidth - m_contentLeft * 2.0);
+    }
+
     const int N = vBlocks.size();
     const int M = m_blocks.size();
 
@@ -261,13 +270,13 @@ void LayoutEngine::layout(const Mapping::DisplayProjection &projection,
     m_blocks.clear();
     m_blocks.reserve(N);
 
-    qreal currentY = 20.0; // Top padding
+    qreal currentY = Theme::ThemeManager::topBreathingPadding();
 
     if (!canReuse) {
         for (int i = 0; i < N; ++i) {
-            layoutSingleBlock(vBlocks[i], i, contentWidth, currentY, preeditOffset, preeditString);
+            layoutSingleBlock(vBlocks[i], i, currentY, preeditOffset, preeditString);
         }
-        m_totalHeight = currentY + 40.0;
+        m_totalHeight = currentY + Theme::ThemeManager::bottomBreathingPadding();
         return;
     }
 
@@ -295,21 +304,21 @@ void LayoutEngine::layout(const Mapping::DisplayProjection &projection,
 
     // 3. Assemble: Prefix (reused layout)
     for (int i = 0; i < prefixLen; ++i) {
-        reuseBlock(oldBlocks[i], vBlocks[i], i, contentWidth, currentY);
+        reuseBlock(oldBlocks[i], vBlocks[i], i, currentY);
     }
 
     // 4. Assemble: Modified / New blocks
     for (int i = prefixLen; i < N - suffixLen; ++i) {
-        layoutSingleBlock(vBlocks[i], i, contentWidth, currentY, preeditOffset, preeditString);
+        layoutSingleBlock(vBlocks[i], i, currentY, preeditOffset, preeditString);
     }
 
     // 5. Assemble: Suffix (reused layout)
     for (int i = N - suffixLen; i < N; ++i) {
         int oldIdx = M - (N - i);
-        reuseBlock(oldBlocks[oldIdx], vBlocks[i], i, contentWidth, currentY);
+        reuseBlock(oldBlocks[oldIdx], vBlocks[i], i, currentY);
     }
 
-    m_totalHeight = currentY + 40.0;
+    m_totalHeight = currentY + Theme::ThemeManager::bottomBreathingPadding();
 }
 
 int LayoutEngine::hitTest(const QPointF &point, const Mapping::DisplayProjection &projection) const {
@@ -428,6 +437,8 @@ void LayoutEngine::paint(QPainter *painter,
         });
     int startIdx = (it != m_blocks.end()) ? static_cast<int>(std::distance(m_blocks.begin(), it)) : 0;
 
+    const auto &palette = Theme::currentPalette();
+
     for (int i = startIdx; i < m_blocks.size(); ++i) {
         const auto &bData = m_blocks[i];
         if (bData.rect.top() > visibleRect.bottom()) {
@@ -447,17 +458,22 @@ void LayoutEngine::paint(QPainter *painter,
                 painter->setRenderHint(QPainter::Antialiasing, true);
 
                 QRectF cardRect = bData.rect.adjusted(2, 2, -2, -2);
-                painter->setPen(QPen(QColor(226, 232, 240), 1.2));
-                painter->setBrush(QColor(248, 250, 252));
+                painter->setPen(QPen(palette.cardBorder, 1.0));
+                painter->setBrush(palette.cardBackground);
                 painter->drawRoundedRect(cardRect, 8.0, 8.0);
 
                 // Badge top-left
                 QRectF badgeRect(cardRect.left() + 10, cardRect.top() + 6, bData.isMathBlock ? 54 : 68, 18);
                 painter->setPen(Qt::NoPen);
-                painter->setBrush(bData.isMathBlock ? QColor(139, 92, 246, 35) : QColor(37, 99, 235, 35));
-                painter->drawRoundedRect(badgeRect, 4.0, 4.0);
-
-                painter->setPen(bData.isMathBlock ? QColor(109, 40, 217) : QColor(29, 78, 216));
+                if (bData.isMathBlock) {
+                    painter->setBrush(QColor(139, 92, 246, 35));
+                    painter->drawRoundedRect(badgeRect, 4.0, 4.0);
+                    painter->setPen(QColor(124, 58, 237));
+                } else {
+                    painter->setBrush(QColor(37, 99, 235, 35));
+                    painter->drawRoundedRect(badgeRect, 4.0, 4.0);
+                    painter->setPen(QColor(37, 99, 235));
+                }
                 QFont badgeFont = painter->font();
                 badgeFont.setPointSize(8);
                 badgeFont.setBold(true);
@@ -469,7 +485,7 @@ void LayoutEngine::paint(QPainter *painter,
                 if (renderer && renderer->isValid()) {
                     renderer->render(painter, contentRect);
                 } else {
-                    painter->setPen(QColor(148, 163, 184));
+                    painter->setPen(palette.secondaryText);
                     QFont hintFont = painter->font();
                     hintFont.setPointSize(9);
                     hintFont.setItalic(true);
@@ -484,15 +500,19 @@ void LayoutEngine::paint(QPainter *painter,
 
         // Draw block specific decorations
         if (vBlock.isCodeBlock || vBlock.isMathBlock) {
-            // Dark rounded background
-            painter->setBrush(QColor(40, 44, 52));
-            painter->setPen(Qt::NoPen);
-            painter->drawRoundedRect(bData.rect.adjusted(-6, -4, 6, 4), 6, 6);
+            // Sleek rounded background with border
+            painter->setBrush(palette.codeBlockBackground);
+            painter->setPen(QPen(palette.codeBlockBorder, 1.0));
+            painter->drawRoundedRect(bData.rect.adjusted(-4, -2, 4, 2), 6, 6);
         } else if (vBlock.isQuote) {
-            // Left quote bar
+            // Soft rounded quote background
             painter->setPen(Qt::NoPen);
-            painter->setBrush(QColor(74, 144, 226));
-            painter->drawRoundedRect(QRectF(bData.rect.left() + 4, bData.rect.top(), 3.5, bData.rect.height()), 1.5, 1.5);
+            painter->setBrush(palette.quoteBackground);
+            painter->drawRoundedRect(bData.rect.adjusted(-2, -2, 2, 2), 6.0, 6.0);
+
+            // Left quote accent bar
+            painter->setBrush(palette.quoteLine);
+            painter->drawRoundedRect(QRectF(bData.rect.left() + 4, bData.rect.top() + 2, 3.5, bData.rect.height() - 4), 1.75, 1.75);
         }
 
         // Selection highlights (supports multiple selections)
@@ -511,7 +531,7 @@ void LayoutEngine::paint(QPainter *painter,
                     int vSelE = vBlock.sourceToVisual(selE);
 
                     painter->setPen(Qt::NoPen);
-                    painter->setBrush(QColor(180, 215, 255, 120));
+                    painter->setBrush(palette.selectionHighlight);
 
                     for (int l = 0; l < bData.layout->lineCount(); ++l) {
                         QTextLine line = bData.layout->lineAt(l);
@@ -545,8 +565,8 @@ void LayoutEngine::paint(QPainter *painter,
             painter->setRenderHint(QPainter::Antialiasing, true);
 
             QRectF previewCard = bData.embeddedPreviewRect.adjusted(2, 2, -2, -2);
-            painter->setPen(QPen(QColor(203, 213, 225), 1.2));
-            painter->setBrush(QColor(255, 255, 255));
+            painter->setPen(QPen(palette.cardBorder, 1.0));
+            painter->setBrush(palette.cardBackground);
             painter->drawRoundedRect(previewCard, 8.0, 8.0);
 
             // Live preview badge

@@ -11,6 +11,7 @@
 #include <QDragMoveEvent>
 #include <QDropEvent>
 #include <QUrl>
+#include <QDir>
 #include <cmath>
 #include <random>
 #include <thread>
@@ -30,6 +31,7 @@
 #include "render/MathSvgRenderer.h"
 #include "render/MermaidSvgRenderer.h"
 #include "render/AsyncRenderService.h"
+#include "theme/Theme.h"
 #include "ui/MainWindow.h"
 
 using namespace MarkdownTool;
@@ -84,6 +86,7 @@ private slots:
     void testSyncFallbackEpochRaceConditionAndUnifiedCache();
     void testRealGuiAsyncAutoRefreshAndInteractiveRegression();
     void testFileAndImageDragAndDrop();
+    void testVisualRedesignScreenshotsAndThemes();
 };
 
 // Probe 1: UTF-8 BOM, CRLF, trailing spaces, no-newline exact byte-for-byte invariance
@@ -3235,6 +3238,132 @@ void TestProbes::testFileAndImageDragAndDrop() {
 
     QVERIFY(mainWindow.sidebar() != nullptr);
     QVERIFY(mainWindow.sidebar()->isVisible());
+}
+
+// Probe 49: Visual Redesign (Phase 1-5) Verification: Design System Colors, Centered 780px Reading Width, Dynamic Theme Switching & Real UI Screenshots
+void TestProbes::testVisualRedesignScreenshotsAndThemes() {
+    // 1. Verify Design System Palettes
+    Theme::ThemeManager::instance().setMode(Theme::ThemeMode::Light);
+    const auto &lightPalette = Theme::ThemeManager::instance().palette();
+    QCOMPARE(lightPalette.appBackground, QColor("#F5F6F8"));
+    QCOMPARE(lightPalette.sidebarBackground, QColor("#F0F2F5"));
+    QCOMPARE(lightPalette.editorBackground, QColor("#FFFFFF"));
+    QCOMPARE(lightPalette.primaryText, QColor("#242932"));
+    QCOMPARE(lightPalette.secondaryText, QColor("#737B88"));
+    QCOMPARE(lightPalette.border, QColor("#E4E8EF"));
+    QCOMPARE(lightPalette.accent, QColor("#5668DB"));
+    QCOMPARE(lightPalette.hover, QColor("#E8EBF3"));
+
+    Theme::ThemeManager::instance().setMode(Theme::ThemeMode::Dark);
+    const auto &darkPalette = Theme::ThemeManager::instance().palette();
+    QCOMPARE(darkPalette.appBackground, QColor("#181A20"));
+    QCOMPARE(darkPalette.sidebarBackground, QColor("#20232B"));
+    QCOMPARE(darkPalette.editorBackground, QColor("#242730"));
+    QCOMPARE(darkPalette.primaryText, QColor("#ECEEF3"));
+    QCOMPARE(darkPalette.secondaryText, QColor("#A0A7B4"));
+    QCOMPARE(darkPalette.border, QColor("#343943"));
+    QCOMPARE(darkPalette.accent, QColor("#92A0FF"));
+    QCOMPARE(darkPalette.hover, QColor("#2C313C"));
+
+    // Reset back to Light for initial load
+    Theme::ThemeManager::instance().setMode(Theme::ThemeMode::Light);
+
+    // 2. Launch MainWindow and set rich Markdown content
+    UI::MainWindow mainWindow;
+    mainWindow.resize(1200, 820);
+    mainWindow.show();
+    QCoreApplication::processEvents();
+
+    QString sampleDoc = QStringLiteral(
+        "# Native Markdown Editor\n\n"
+        "面向桌面端的高性能 **原生 Markdown 写作工具**，兼具 *Craft*、*Bear* 与 *Linear* 的现代设计质感。\n\n"
+        "访问项目官网：[Native Markdown Editor](https://github.com/WildEgoLee/native-markdown-editor)\n\n"
+        "## 系统架构与渲染流程\n\n"
+        "```mermaid\n"
+        "graph TD\n"
+        "    Source[Markdown 源文本] --> Parser(增量 AST 分析器)\n"
+        "    Parser --> Projection[视觉投影引擎]\n"
+        "    Projection --> Layout{780px 居中排版引擎}\n"
+        "    Layout --> Viewport[原生双缓冲渲染]\n"
+        "    Layout --> Outline[多级折叠大纲]\n"
+        "```\n\n"
+        "## 核心特性\n\n"
+        "- **780px 阅读宽度**：自适应居中留白与 56px 顶部留白\n"
+        "- **双主题引擎**：Paper Light 与 Graphite Dark 实时平滑切换\n"
+        "- **全矢量图标**：42px 现代精简工具栏与 26px 弱视觉层级状态栏\n"
+        "- **数学公式排版**：\n\n"
+        "$$\\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}$$\n\n"
+        "## 代码块与表格\n\n"
+        "```cpp\n"
+        "// 现代 C++20 与 Qt 6 原生排版\n"
+        "auto layout = LayoutEngine();\n"
+        "layout.layout(projection, 780.0);\n"
+        "```\n\n"
+        "| 特性模块 | 设计规范 | 渲染状态 |\n"
+        "| :--- | :--- | :--- |\n"
+        "| 工具栏 | 42px 线性矢量 | 已就绪 |\n"
+        "| 侧边栏 | Pill 切换器 + 自然缩进 | 已就绪 |\n"
+        "| 编辑器画布 | 780px 居中自适应 | 已就绪 |\n"
+    );
+
+    mainWindow.editorView()->buffer().setText(sampleDoc);
+    mainWindow.editorView()->undoStack().clear();
+    mainWindow.editorView()->setCursorPos(0);
+    QTest::qWait(300);
+
+    // 3. Verify LayoutEngine 780px Centering and Top Margin
+    const auto &layoutEng = mainWindow.editorView()->layoutEngine();
+    QVERIFY(layoutEng.contentWidth() <= 780.0);
+    QCOMPARE(layoutEng.contentWidth(), 780.0);
+    QVERIFY(layoutEng.contentLeft() > 0.0);
+    qreal vpWidth = mainWindow.editorView()->viewport()->width();
+    qreal expectedLeft = qMax(40.0, (vpWidth - 780.0) / 2.0);
+    QVERIFY(qAbs(layoutEng.contentLeft() - expectedLeft) < 2.0);
+
+    // Check top margin of first block: 56px canvas top padding + 28px H1 marginTop = 84px
+    QVERIFY(!layoutEng.blocks().isEmpty());
+    QCOMPARE(layoutEng.blocks().first().rect.top(), 56.0 + 28.0);
+
+    // 4. Capture Light Theme Screenshot
+    QDir().mkpath(QStringLiteral("screenshots"));
+    QPixmap lightPixmap = mainWindow.grab();
+    QVERIFY(!lightPixmap.isNull());
+    QVERIFY(lightPixmap.width() >= 1000);
+    QVERIFY(lightPixmap.height() >= 700);
+    lightPixmap.save(QStringLiteral("screenshots/editor_paper_light.png"));
+
+    // 5. Switch to Graphite Dark Theme
+    Theme::ThemeManager::instance().setMode(Theme::ThemeMode::Dark);
+    QTest::qWait(300);
+    QCOMPARE(Theme::ThemeManager::instance().currentMode(), Theme::ThemeMode::Dark);
+
+    QPixmap darkPixmap = mainWindow.grab();
+    QVERIFY(!darkPixmap.isNull());
+    darkPixmap.save(QStringLiteral("screenshots/editor_graphite_dark.png"));
+
+    // 6. Test Source Mode and capture screenshot
+    mainWindow.editorView()->setSourceMode(true);
+    QTest::qWait(200);
+    QVERIFY(mainWindow.editorView()->isSourceMode());
+
+    QPixmap sourcePixmap = mainWindow.grab();
+    QVERIFY(!sourcePixmap.isNull());
+    sourcePixmap.save(QStringLiteral("screenshots/editor_graphite_dark_source.png"));
+
+    mainWindow.editorView()->setSourceMode(false);
+    QTest::qWait(150);
+
+    // 7. Verify Sidebar Segmented Control & Outline Filtering
+    auto *sidebar = mainWindow.sidebar();
+    QVERIFY(sidebar != nullptr);
+    auto *outline = sidebar->outlineWidget();
+    QVERIFY(outline != nullptr);
+    outline->filter(QStringLiteral("架构"));
+    QTest::qWait(50);
+    outline->filter(QString());
+
+    // Restore to default Paper Light
+    Theme::ThemeManager::instance().setMode(Theme::ThemeMode::Light);
 }
 
 QTEST_MAIN(TestProbes)

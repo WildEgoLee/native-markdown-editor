@@ -21,6 +21,9 @@ set(CMARK_STATIC ON CACHE BOOL "" FORCE)
 add_subdirectory(3rdparty/cmark-gfm)
 
 set(CORE_SOURCES
+    src/theme/Theme.h
+    src/theme/Theme.cpp
+
     src/core/Position.h
     src/core/Position.cpp
     src/core/TextBuffer.h

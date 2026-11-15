@@ -1,4 +1,5 @@
 #include "DisplayProjection.h"
+#include "theme/Theme.h"
 
 #include <QFont>
 #include <QColor>
@@ -181,6 +182,7 @@ static void applyInlineStyles(const Parser::SemanticNodePtr &inlineNode,
     case NodeType::Emphasis:
     case NodeType::Strikethrough:
     case NodeType::CodeSpan: {
+        const auto &palette = Theme::currentPalette();
         bool isActive = isSourceMode || inlineNode->fullRange.contains(cursorPos);
 
         QTextCharFormat styledFormat = baseFormat;
@@ -191,9 +193,10 @@ static void applyInlineStyles(const Parser::SemanticNodePtr &inlineNode,
         } else if (inlineNode->type == NodeType::Strikethrough) {
             styledFormat.setFontStrikeOut(true);
         } else if (inlineNode->type == NodeType::CodeSpan) {
-            styledFormat.setFontFamilies({QStringLiteral("Consolas"), QStringLiteral("Courier New"), QStringLiteral("monospace")});
-            styledFormat.setBackground(QColor(235, 237, 240));
-            styledFormat.setForeground(QColor(199, 37, 78));
+            styledFormat.setFontFamilies({QStringLiteral("Cascadia Code"), QStringLiteral("Consolas"), QStringLiteral("Fira Code"), QStringLiteral("monospace")});
+            styledFormat.setFontPointSize(qMax(9.0, baseFormat.fontPointSize() - 1.0));
+            styledFormat.setBackground(palette.inlineCodeBackground);
+            styledFormat.setForeground(palette.inlineCodeText);
         }
 
         // Prefix marker
@@ -206,7 +209,7 @@ static void applyInlineStyles(const Parser::SemanticNodePtr &inlineNode,
                 prefixSeg.visualLength = prefixSeg.text.length();
                 prefixSeg.type = SegmentType::SyntaxMarker;
                 prefixSeg.format = baseFormat;
-                prefixSeg.format.setForeground(QColor(160, 160, 160));
+                prefixSeg.format.setForeground(palette.syntaxMarkerColor);
                 block.visualText.append(prefixSeg.text);
             } else {
                 prefixSeg.visualStart = block.visualText.length();
@@ -244,7 +247,7 @@ static void applyInlineStyles(const Parser::SemanticNodePtr &inlineNode,
                 suffixSeg.visualLength = suffixSeg.text.length();
                 suffixSeg.type = SegmentType::SyntaxMarker;
                 suffixSeg.format = baseFormat;
-                suffixSeg.format.setForeground(QColor(160, 160, 160));
+                suffixSeg.format.setForeground(palette.syntaxMarkerColor);
                 block.visualText.append(suffixSeg.text);
             } else {
                 suffixSeg.visualStart = block.visualText.length();
@@ -252,6 +255,16 @@ static void applyInlineStyles(const Parser::SemanticNodePtr &inlineNode,
                 suffixSeg.type = SegmentType::HiddenMarker;
             }
             block.segments.append(suffixSeg);
+        }
+        break;
+    }
+
+    case NodeType::Link: {
+        QTextCharFormat linkFormat = baseFormat;
+        linkFormat.setForeground(Theme::currentPalette().accent);
+        linkFormat.setFontUnderline(true);
+        for (const auto &child : inlineNode->children) {
+            applyInlineStyles(child, buffer, cursorPos, isSourceMode, block, linkFormat);
         }
         break;
     }
@@ -546,26 +559,28 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
         return;
     }
 
+    const auto &palette = Theme::currentPalette();
+
     VisualBlock block;
     block.blockType = node->type;
     block.sourceRange = node->fullRange;
 
     QTextCharFormat baseFormat;
-    baseFormat.setFontFamilies({QStringLiteral("Segoe UI"), QStringLiteral("Microsoft YaHei"), QStringLiteral("sans-serif")});
-    baseFormat.setFontPointSize(14);
-    baseFormat.setForeground(QColor(40, 44, 52));
+    baseFormat.setFontFamilies({QStringLiteral("Segoe UI"), QStringLiteral("Microsoft YaHei UI"), QStringLiteral("-apple-system"), QStringLiteral("sans-serif")});
+    baseFormat.setFontPointSize(12);
+    baseFormat.setForeground(palette.primaryText);
 
     if (node->type == NodeType::Heading) {
         block.headingLevel = node->headingLevel;
         baseFormat.setFontWeight(QFont::Bold);
 
-        qreal pointSize = 14;
+        qreal pointSize = 12;
         switch (node->headingLevel) {
-        case 1: pointSize = 24; block.marginTop = 16; block.marginBottom = 8; break;
-        case 2: pointSize = 20; block.marginTop = 14; block.marginBottom = 6; break;
-        case 3: pointSize = 17; block.marginTop = 12; block.marginBottom = 4; break;
-        case 4: pointSize = 15; block.marginTop = 10; block.marginBottom = 4; break;
-        default: pointSize = 14; block.marginTop = 8; block.marginBottom = 4; break;
+        case 1: pointSize = 24; block.marginTop = 28; block.marginBottom = 12; break;
+        case 2: pointSize = 20; block.marginTop = 22; block.marginBottom = 10; break;
+        case 3: pointSize = 16; block.marginTop = 16; block.marginBottom = 8; break;
+        case 4: pointSize = 14; block.marginTop = 14; block.marginBottom = 6; break;
+        default: pointSize = 12; block.marginTop = 10; block.marginBottom = 4; break;
         }
         baseFormat.setFontPointSize(pointSize);
 
@@ -579,7 +594,7 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
                 prefixSeg.visualLength = prefixSeg.text.length();
                 prefixSeg.type = SegmentType::SyntaxMarker;
                 prefixSeg.format = baseFormat;
-                prefixSeg.format.setForeground(QColor(160, 160, 160));
+                prefixSeg.format.setForeground(palette.syntaxMarkerColor);
                 block.visualText.append(prefixSeg.text);
             } else {
                 prefixSeg.visualStart = block.visualText.length();
@@ -597,8 +612,8 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
         block.isTaskChecked = node->isTaskChecked;
         block.checkboxSourceRange = node->taskCheckboxRange;
         block.indentLevel = 1;
-        block.marginTop = 3;
-        block.marginBottom = 3;
+        block.marginTop = 4;
+        block.marginBottom = 4;
 
         // Visual task checkbox or bullet
         if (node->isTaskItem && !isSourceMode) {
@@ -610,7 +625,7 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
             checkSeg.type = SegmentType::TaskCheckBox;
             checkSeg.isInteractive = true;
             checkSeg.format = baseFormat;
-            checkSeg.format.setForeground(node->isTaskChecked ? QColor(50, 130, 240) : QColor(100, 100, 100));
+            checkSeg.format.setForeground(node->isTaskChecked ? palette.taskCheckedColor : palette.taskUncheckedColor);
 
             block.visualText.append(checkSeg.text);
             block.segments.append(checkSeg);
@@ -627,9 +642,9 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
         }
     } else if (node->type == NodeType::BlockQuote) {
         block.isQuote = true;
-        block.marginTop = 6;
-        block.marginBottom = 6;
-        baseFormat.setForeground(QColor(100, 105, 115));
+        block.marginTop = 8;
+        block.marginBottom = 8;
+        baseFormat.setForeground(palette.secondaryText);
         baseFormat.setFontItalic(true);
 
         bool isActive = isSourceMode || node->fullRange.contains(cursorPos);
@@ -642,7 +657,7 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
                 prefixSeg.visualLength = prefixSeg.text.length();
                 prefixSeg.type = SegmentType::SyntaxMarker;
                 prefixSeg.format = baseFormat;
-                prefixSeg.format.setForeground(QColor(160, 160, 160));
+                prefixSeg.format.setForeground(palette.syntaxMarkerColor);
                 block.visualText.append(prefixSeg.text);
             } else {
                 prefixSeg.visualStart = block.visualText.length();
@@ -664,8 +679,8 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
     } else if (node->type == NodeType::CodeBlock) {
         block.isCodeBlock = true;
         block.codeLanguage = node->codeLanguage;
-        block.marginTop = 8;
-        block.marginBottom = 8;
+        block.marginTop = 10;
+        block.marginBottom = 10;
 
         bool isMermaid = (node->codeLanguage.compare(QStringLiteral("mermaid"), Qt::CaseInsensitive) == 0);
         if (isMermaid) {
@@ -674,9 +689,9 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
             block.isInteractiveActive = isSourceMode || node->fullRange.contains(cursorPos);
         }
 
-        baseFormat.setFontFamilies({QStringLiteral("Consolas"), QStringLiteral("Fira Code"), QStringLiteral("Courier New"), QStringLiteral("monospace")});
-        baseFormat.setFontPointSize(12);
-        baseFormat.setForeground(QColor(220, 225, 230));
+        baseFormat.setFontFamilies({QStringLiteral("Cascadia Code"), QStringLiteral("Consolas"), QStringLiteral("Fira Code"), QStringLiteral("monospace")});
+        baseFormat.setFontPointSize(10.5);
+        baseFormat.setForeground(palette.primaryText);
 
         VisualSegment codeSeg;
         codeSeg.sourceRange = node->fullRange;
@@ -690,14 +705,14 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
         block.segments.append(codeSeg);
     } else if (node->type == NodeType::MathBlock) {
         block.isMathBlock = true;
-        block.marginTop = 10;
-        block.marginBottom = 10;
+        block.marginTop = 12;
+        block.marginBottom = 12;
         block.embeddedSource = node->textContent.isEmpty() ? fullText.mid(node->fullRange.start, node->fullRange.length()) : node->textContent;
         block.isInteractiveActive = isSourceMode || node->fullRange.contains(cursorPos);
 
-        baseFormat.setFontFamilies({QStringLiteral("Consolas"), QStringLiteral("Fira Code"), QStringLiteral("Courier New"), QStringLiteral("monospace")});
-        baseFormat.setFontPointSize(12);
-        baseFormat.setForeground(QColor(200, 210, 225));
+        baseFormat.setFontFamilies({QStringLiteral("Cascadia Code"), QStringLiteral("Consolas"), QStringLiteral("Fira Code"), QStringLiteral("monospace")});
+        baseFormat.setFontPointSize(10.5);
+        baseFormat.setForeground(palette.primaryText);
 
         VisualSegment mathSeg;
         mathSeg.sourceRange = node->fullRange;
@@ -714,8 +729,8 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
         block.marginBottom = 10;
         bool isActive = isSourceMode || node->fullRange.contains(cursorPos);
 
-        baseFormat.setFontFamilies({QStringLiteral("Consolas"), QStringLiteral("Segoe UI"), QStringLiteral("sans-serif")});
-        baseFormat.setFontPointSize(13);
+        baseFormat.setFontFamilies({QStringLiteral("Cascadia Code"), QStringLiteral("Consolas"), QStringLiteral("Segoe UI"), QStringLiteral("sans-serif")});
+        baseFormat.setFontPointSize(11);
 
         VisualSegment tableSeg;
         tableSeg.sourceRange = node->fullRange;
@@ -726,28 +741,28 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
         tableSeg.format = baseFormat;
 
         if (!isActive) {
-            tableSeg.format.setBackground(QColor(248, 250, 252));
+            tableSeg.format.setBackground(palette.tableCellBackground);
         }
 
         block.visualText = tableSeg.text;
         block.segments.append(tableSeg);
     } else if (node->type == NodeType::ThematicBreak) {
-        block.marginTop = 12;
-        block.marginBottom = 12;
+        block.marginTop = 14;
+        block.marginBottom = 14;
         VisualSegment hrSeg;
         hrSeg.sourceRange = node->fullRange;
-        hrSeg.text = QStringLiteral("──────");
+        hrSeg.text = QStringLiteral("────────────────────────");
         hrSeg.visualStart = 0;
         hrSeg.visualLength = hrSeg.text.length();
         hrSeg.format = baseFormat;
-        hrSeg.format.setForeground(QColor(210, 215, 220));
+        hrSeg.format.setForeground(palette.hrColor);
 
         block.visualText = hrSeg.text;
         block.segments.append(hrSeg);
     } else {
         // Normal paragraph
-        block.marginTop = 4;
-        block.marginBottom = 4;
+        block.marginTop = 5;
+        block.marginBottom = 5;
         for (const auto &child : node->children) {
             applyInlineStyles(child, buffer, cursorPos, isSourceMode, block, baseFormat);
         }

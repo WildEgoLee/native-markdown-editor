@@ -1,4 +1,5 @@
 #include "FindReplaceBar.h"
+#include "theme/Theme.h"
 
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -9,12 +10,11 @@ namespace MarkdownTool::UI {
 FindReplaceBar::FindReplaceBar(QWidget *parent)
     : QWidget(parent)
 {
-    setStyleSheet(QStringLiteral(
-        "FindReplaceBar { background: #f6f8fa; border-bottom: 1px solid #d0d7de; padding: 4px; }"
-        "QLineEdit { border: 1px solid #d0d7de; border-radius: 4px; padding: 4px 8px; background: #ffffff; }"
-        "QPushButton { border: 1px solid #d0d7de; border-radius: 4px; padding: 4px 10px; background: #ffffff; }"
-        "QPushButton:hover { background: #eaeef2; }"
-    ));
+    setObjectName(QStringLiteral("findReplaceBar"));
+    setStyleSheet(Theme::ThemeManager::instance().findBarStylesheet());
+    connect(&Theme::ThemeManager::instance(), &Theme::ThemeManager::themeChanged, this, [this]() {
+        setStyleSheet(Theme::ThemeManager::instance().findBarStylesheet());
+    });
 
     auto mainLayout = new QVBoxLayout(this);
     mainLayout->setContentsMargins(8, 4, 8, 4);

@@ -13,6 +13,7 @@
 #include <QRegularExpression>
 #include <QFileInfo>
 #include <QDir>
+#include "theme/Theme.h"
 #include <algorithm>
 
 namespace MarkdownTool::Editor {
@@ -30,6 +31,12 @@ NativeEditorView::NativeEditorView(QWidget *parent)
     m_blinkTimer->setInterval(500);
     connect(m_blinkTimer, &QTimer::timeout, this, &NativeEditorView::onBlinkTimer);
     m_blinkTimer->start();
+
+    connect(&Theme::ThemeManager::instance(), &Theme::ThemeManager::themeChanged, this, [this]() {
+        m_projection.buildProjection(m_rootNode, m_buffer, m_cursorPos, m_isSourceMode);
+        m_layoutEngine.layout(m_projection, viewport()->width());
+        viewport()->update();
+    });
 
     m_slashPopup = new UI::SlashCommandPopup(this);
     connect(m_slashPopup, &UI::SlashCommandPopup::actionTriggered, this, [this](const UI::SlashAction &action) {
@@ -1357,9 +1364,10 @@ void NativeEditorView::focusOutEvent(QFocusEvent *event) {
 
 void NativeEditorView::paintEvent(QPaintEvent *event) {
     QPainter painter(viewport());
+    const auto &palette = Theme::currentPalette();
 
-    // Clean background
-    painter.fillRect(viewport()->rect(), QColor(255, 255, 255));
+    // Theme-aware canvas background
+    painter.fillRect(viewport()->rect(), palette.editorBackground);
 
     painter.save();
     painter.translate(-horizontalScrollBar()->value(), -verticalScrollBar()->value());
@@ -1374,7 +1382,7 @@ void NativeEditorView::paintEvent(QPaintEvent *event) {
     // Draw cursor carets
     if (m_cursorVisible && hasFocus()) {
         painter.setPen(Qt::NoPen);
-        painter.setBrush(QColor(40, 100, 230)); // Modern primary blue cursor
+        painter.setBrush(palette.caretColor); // Theme-aware primary accent caret
         for (const auto &c : m_cursors) {
             if (!c.hasSelection()) {
                 QRectF cRect = m_layoutEngine.cursorRect(c.cursor, m_projection);

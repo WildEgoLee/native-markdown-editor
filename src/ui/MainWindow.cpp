@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 #include "FindReplaceBar.h"
 #include "file/FileService.h"
+#include "theme/Theme.h"
 
 #include <QMenuBar>
 #include <QToolBar>
@@ -26,6 +27,9 @@ MainWindow::MainWindow(QWidget *parent)
     m_recoveryTimer->start();
 
     updateTitle();
+    updateThemeStyles();
+    connect(&Theme::ThemeManager::instance(), &Theme::ThemeManager::themeChanged, this, &MainWindow::updateThemeStyles);
+
     resize(1100, 750);
 }
 
@@ -185,6 +189,9 @@ void MainWindow::setupMenusAndToolbars() {
     QMenu *viewMenu = mb->addMenu(QStringLiteral("视图 (&V)"));
     QAction *toggleModeAct = viewMenu->addAction(QStringLiteral("切换源码模式 (Ctrl+/)"), [this]() {
         m_editorView->setSourceMode(!m_editorView->isSourceMode());
+        if (m_tbMode) {
+            m_tbMode->setIcon(Theme::ThemeManager::instance().icon(m_editorView->isSourceMode() ? QStringLiteral("source") : QStringLiteral("mode"), 18));
+        }
     });
     toggleModeAct->setShortcut(QKeySequence(QStringLiteral("Ctrl+/")));
 
@@ -193,61 +200,78 @@ void MainWindow::setupMenusAndToolbars() {
     });
     toggleSidebarAct->setShortcut(QKeySequence(QStringLiteral("Ctrl+\\")));
 
-    // Toolbar
+    viewMenu->addSeparator();
+    QAction *toggleThemeAct = viewMenu->addAction(QStringLiteral("切换浅色/深色主题 (Ctrl+T)"), []() {
+        Theme::ThemeManager::instance().toggleMode();
+    });
+    toggleThemeAct->setShortcut(QKeySequence(QStringLiteral("Ctrl+T")));
+
+    // Sleek Modern Toolbar
     QToolBar *tb = addToolBar(QStringLiteral("主工具栏"));
     tb->setMovable(false);
+    tb->setIconSize(QSize(18, 18));
+    tb->setToolButtonStyle(Qt::ToolButtonIconOnly);
 
-    QAction *tbSidebar = tb->addAction(QStringLiteral("📁 侧边栏"));
-    connect(tbSidebar, &QAction::triggered, [this]() {
+    m_tbSidebar = tb->addAction(Theme::ThemeManager::instance().icon(QStringLiteral("sidebar"), 18), QStringLiteral("侧边栏 (Ctrl+\\)"));
+    m_tbSidebar->setToolTip(QStringLiteral("展开/折叠侧边栏 (Ctrl+\\)"));
+    connect(m_tbSidebar, &QAction::triggered, [this]() {
         m_sidebar->setVisible(!m_sidebar->isVisible());
     });
-    tb->addSeparator();
-
-    QAction *tbBold = tb->addAction(QStringLiteral("加粗"));
-    connect(tbBold, &QAction::triggered, m_editorView, &Editor::NativeEditorView::toggleBold);
-
-    QAction *tbItalic = tb->addAction(QStringLiteral("斜体"));
-    connect(tbItalic, &QAction::triggered, m_editorView, &Editor::NativeEditorView::toggleItalic);
-
-    QAction *tbStrike = tb->addAction(QStringLiteral("删除线"));
-    connect(tbStrike, &QAction::triggered, m_editorView, &Editor::NativeEditorView::toggleStrikethrough);
-
-    QAction *tbCode = tb->addAction(QStringLiteral("代码"));
-    connect(tbCode, &QAction::triggered, m_editorView, &Editor::NativeEditorView::toggleCodeSpan);
-
-    QAction *tbLink = tb->addAction(QStringLiteral("链接"));
-    connect(tbLink, &QAction::triggered, m_editorView, &Editor::NativeEditorView::insertLink);
-
-    QAction *tbTask = tb->addAction(QStringLiteral("任务框"));
-    connect(tbTask, &QAction::triggered, m_editorView, &Editor::NativeEditorView::toggleTaskList);
 
     tb->addSeparator();
 
-    auto comboHeading = new QComboBox(this);
-    comboHeading->addItems({QStringLiteral("段落"),
-                            QStringLiteral("标题 1"),
-                            QStringLiteral("标题 2"),
-                            QStringLiteral("标题 3"),
-                            QStringLiteral("标题 4")});
-    connect(comboHeading, &QComboBox::activated, this, [this](int index) {
-        m_editorView->insertHeading(index);
+    m_tbNew = tb->addAction(Theme::ThemeManager::instance().icon(QStringLiteral("new"), 18), QStringLiteral("新建 (Ctrl+N)"));
+    m_tbNew->setToolTip(QStringLiteral("新建文档 (Ctrl+N)"));
+    connect(m_tbNew, &QAction::triggered, this, &MainWindow::newFile);
+
+    m_tbOpen = tb->addAction(Theme::ThemeManager::instance().icon(QStringLiteral("open"), 18), QStringLiteral("打开 (Ctrl+O)"));
+    m_tbOpen->setToolTip(QStringLiteral("打开文档 (Ctrl+O)"));
+    connect(m_tbOpen, &QAction::triggered, this, &MainWindow::openFileDialog);
+
+    m_tbSave = tb->addAction(Theme::ThemeManager::instance().icon(QStringLiteral("save"), 18), QStringLiteral("保存 (Ctrl+S)"));
+    m_tbSave->setToolTip(QStringLiteral("保存文档 (Ctrl+S)"));
+    connect(m_tbSave, &QAction::triggered, this, &MainWindow::saveFile);
+
+    tb->addSeparator();
+
+    m_tbUndo = tb->addAction(Theme::ThemeManager::instance().icon(QStringLiteral("undo"), 18), QStringLiteral("撤销 (Ctrl+Z)"));
+    m_tbUndo->setToolTip(QStringLiteral("撤销上一操作 (Ctrl+Z)"));
+    connect(m_tbUndo, &QAction::triggered, m_editorView, &Editor::NativeEditorView::undo);
+
+    m_tbRedo = tb->addAction(Theme::ThemeManager::instance().icon(QStringLiteral("redo"), 18), QStringLiteral("重做 (Ctrl+Y)"));
+    m_tbRedo->setToolTip(QStringLiteral("重做操作 (Ctrl+Y)"));
+    connect(m_tbRedo, &QAction::triggered, m_editorView, &Editor::NativeEditorView::redo);
+
+    tb->addSeparator();
+
+    m_tbFind = tb->addAction(Theme::ThemeManager::instance().icon(QStringLiteral("find"), 18), QStringLiteral("查找与替换 (Ctrl+F)"));
+    m_tbFind->setToolTip(QStringLiteral("查找与替换 (Ctrl+F)"));
+    connect(m_tbFind, &QAction::triggered, m_findBar, &FindReplaceBar::openFind);
+
+    // Spacer to right-align theme & mode actions
+    auto spacer = new QWidget(this);
+    spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    tb->addWidget(spacer);
+
+    m_tbTheme = tb->addAction(Theme::ThemeManager::instance().icon(QStringLiteral("theme"), 18), QStringLiteral("切换浅色/深色主题 (Ctrl+T)"));
+    m_tbTheme->setToolTip(QStringLiteral("切换浅色 / 深色主题 (Ctrl+T)"));
+    connect(m_tbTheme, &QAction::triggered, []() {
+        Theme::ThemeManager::instance().toggleMode();
     });
-    tb->addWidget(comboHeading);
 
-    tb->addSeparator();
-
-    QAction *tbMode = tb->addAction(QStringLiteral("源码/预览切换"));
-    connect(tbMode, &QAction::triggered, [this]() {
+    m_tbMode = tb->addAction(Theme::ThemeManager::instance().icon(QStringLiteral("mode"), 18), QStringLiteral("切换即时预览 / 源码模式 (Ctrl+/)"));
+    m_tbMode->setToolTip(QStringLiteral("切换即时预览 / 源码模式 (Ctrl+/)"));
+    connect(m_tbMode, &QAction::triggered, [this]() {
         m_editorView->setSourceMode(!m_editorView->isSourceMode());
+        m_tbMode->setIcon(Theme::ThemeManager::instance().icon(m_editorView->isSourceMode() ? QStringLiteral("source") : QStringLiteral("mode"), 18));
     });
 }
 
 void MainWindow::updateTitle() {
     QString title = m_session.displayName();
     if (m_editorView->undoStack().isDirty()) {
-        title.prepend(QStringLiteral("* "));
+        title.prepend(QStringLiteral("● "));
     }
-    title.append(QStringLiteral(" - Windows 原生 Markdown 编辑器"));
     setWindowTitle(title);
 }
 
@@ -258,11 +282,29 @@ void MainWindow::updateStatusBar(int line, int col, int) {
 
     QString encStr = (m_editorView->buffer().encoding() == Core::DocumentEncoding::Utf8Bom) ? QStringLiteral("UTF-8 BOM") : QStringLiteral("UTF-8");
     QString leStr = (m_editorView->buffer().lineEnding() == Core::LineEnding::Crlf) ? QStringLiteral("CRLF") : QStringLiteral("LF");
-    m_statusEncodingLabel->setText(encStr + QStringLiteral(" | ") + leStr);
+    m_statusEncodingLabel->setText(encStr + QStringLiteral(" · ") + leStr);
 }
 
 void MainWindow::onCleanStateChanged(bool isClean) {
-    m_statusDirtyLabel->setText(isClean ? QStringLiteral("已保存") : QStringLiteral("未保存 *"));
+    m_statusDirtyLabel->setText(isClean ? QStringLiteral("● 已保存") : QStringLiteral("○ 未保存"));
+    updateTitle();
+}
+
+void MainWindow::updateThemeStyles() {
+    setStyleSheet(Theme::ThemeManager::instance().mainStylesheet());
+
+    if (m_tbSidebar) m_tbSidebar->setIcon(Theme::ThemeManager::instance().icon(QStringLiteral("sidebar"), 18));
+    if (m_tbNew) m_tbNew->setIcon(Theme::ThemeManager::instance().icon(QStringLiteral("new"), 18));
+    if (m_tbOpen) m_tbOpen->setIcon(Theme::ThemeManager::instance().icon(QStringLiteral("open"), 18));
+    if (m_tbSave) m_tbSave->setIcon(Theme::ThemeManager::instance().icon(QStringLiteral("save"), 18));
+    if (m_tbUndo) m_tbUndo->setIcon(Theme::ThemeManager::instance().icon(QStringLiteral("undo"), 18));
+    if (m_tbRedo) m_tbRedo->setIcon(Theme::ThemeManager::instance().icon(QStringLiteral("redo"), 18));
+    if (m_tbFind) m_tbFind->setIcon(Theme::ThemeManager::instance().icon(QStringLiteral("find"), 18));
+    if (m_tbTheme) m_tbTheme->setIcon(Theme::ThemeManager::instance().icon(QStringLiteral("theme"), 18));
+    if (m_tbMode) {
+        bool isSource = m_editorView ? m_editorView->isSourceMode() : false;
+        m_tbMode->setIcon(Theme::ThemeManager::instance().icon(isSource ? QStringLiteral("source") : QStringLiteral("mode"), 18));
+    }
     updateTitle();
 }
 

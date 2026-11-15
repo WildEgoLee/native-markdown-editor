@@ -39,6 +39,10 @@ public:
     FindReplaceBar *findBar() const { return m_findBar; }
     const QStringList &recentFiles() const { return m_recentFiles; }
     QMenu *recentFilesMenu() const { return m_recentMenu; }
+    QAction *actWidthAdaptive() const { return m_actWidthAdaptive; }
+    QAction *actWidthNarrow() const { return m_actWidthNarrow; }
+    QAction *actWidthStandard() const { return m_actWidthStandard; }
+    QAction *actWidthWide() const { return m_actWidthWide; }
 
 public slots:
     void addRecentFile(const QString &filePath);
@@ -101,6 +105,11 @@ private:
     QAction *m_actSans = nullptr;
     QAction *m_actSerif = nullptr;
     QAction *m_actMono = nullptr;
+
+    QAction *m_actWidthAdaptive = nullptr;
+    QAction *m_actWidthNarrow = nullptr;
+    QAction *m_actWidthStandard = nullptr;
+    QAction *m_actWidthWide = nullptr;
 
     QMenu *m_recentMenu = nullptr;
     QStringList m_recentFiles;

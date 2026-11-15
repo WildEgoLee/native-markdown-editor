@@ -68,6 +68,7 @@ public:
                const QString &preeditString = QString());
 
     const QVector<BlockLayoutData> &blocks() const { return m_blocks; }
+    void invalidateLayout();
 
 private:
     void layoutSingleBlock(const Mapping::VisualBlock &vBlock,
@@ -87,7 +88,11 @@ private:
 
     QVector<BlockLayoutData> m_blocks;
     qreal m_totalHeight = 0;
-    qreal m_lastWidth = 0;
+    qreal m_lastViewportWidth = 0;
+    qreal m_lastContentWidth = 0;
+    qreal m_lastBasePointSize = 0;
+    int m_lastFontPreset = -1;
+    QString m_lastCustomFont;
     qreal m_contentLeft = 20.0;
     qreal m_contentWidth = 780.0;
 };

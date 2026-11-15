@@ -102,6 +102,7 @@ private slots:
     void testWheelZoomAndReadingAnchor();
     void testFontDialogThemeAndLegibility();
     void testRecentFilesHistoryPersistenceAndMenu();
+    void testAdaptiveReadingWidthAndTypographyReflow();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempSettingsDir;
@@ -4183,6 +4184,121 @@ void TestProbes::testRecentFilesHistoryPersistenceAndMenu() {
     QCOMPARE(w2.recentFiles().size(), 1);
     QCOMPARE(w2.recentFiles().first(), normA);
     QCOMPARE(w2.sidebar()->recentTree()->topLevelItemCount(), 1);
+}
+
+void TestProbes::testAdaptiveReadingWidthAndTypographyReflow() {
+    // --- 1. Mathematical Scaling Verification of calculateAdaptiveReadingWidth ---
+    QCOMPARE(Theme::ThemeManager::calculateAdaptiveReadingWidth(12.0), 780.0);
+    QCOMPARE(Theme::ThemeManager::calculateAdaptiveReadingWidth(14.0), 910.0);
+    QCOMPARE(Theme::ThemeManager::calculateAdaptiveReadingWidth(16.0), 1040.0);
+    QCOMPARE(Theme::ThemeManager::calculateAdaptiveReadingWidth(18.0), 1120.0); // Clamped at 1120
+    QCOMPARE(Theme::ThemeManager::calculateAdaptiveReadingWidth(24.0), 1120.0); // Clamped at 1120
+    QCOMPARE(Theme::ThemeManager::calculateAdaptiveReadingWidth(8.0), 640.0);   // Clamped at 640
+
+    // --- 2. Fixed & Adaptive Mode Logic ---
+    auto &theme = Theme::ThemeManager::instance();
+    theme.setBasePointSize(12.0);
+
+    theme.setReadingWidthMode(Theme::ThemeManager::ReadingWidthMode::Narrow);
+    QCOMPARE(theme.maxReadingWidth(), 640.0);
+
+    theme.setReadingWidthMode(Theme::ThemeManager::ReadingWidthMode::Standard);
+    QCOMPARE(theme.maxReadingWidth(), 780.0);
+
+    theme.setReadingWidthMode(Theme::ThemeManager::ReadingWidthMode::Wide);
+    QCOMPARE(theme.maxReadingWidth(), 1040.0);
+
+    theme.setReadingWidthMode(Theme::ThemeManager::ReadingWidthMode::Adaptive);
+    QCOMPARE(theme.maxReadingWidth(), 780.0);
+    theme.setBasePointSize(14.0);
+    QCOMPARE(theme.maxReadingWidth(), 910.0);
+    theme.setBasePointSize(16.0);
+    QCOMPARE(theme.maxReadingWidth(), 1040.0);
+    theme.setBasePointSize(18.0);
+    QCOMPARE(theme.maxReadingWidth(), 1120.0);
+
+    // --- 3. LayoutEngine Dynamic Expansion & Reflow at Constant Viewport ---
+    Parser::MarkdownParserAdapter parser;
+    Core::TextBuffer buffer;
+    buffer.setText(QStringLiteral(
+        "# 自适应阅读宽度重排测试\n\n"
+        "这是一段较长且文字连贯的 Markdown 段落，用来严密验证在宽屏显示器下，"
+        "当用户放大字号时，排版引擎不仅仅是将文字自身像素放大，还会自适应地适度扩展"
+        "正文阅读宽度，让每一行能够保持最佳的文字容纳量，避免频繁出现局促的断行与大片空白。\n\n"
+        "- 列表项第一条：验证自适应布局下的缩进与换行宽度\n"
+        "- 列表项第二条：验证列表项随字号缩放时的排版表现\n"
+    ));
+
+    auto root = parser.parse(buffer);
+    Mapping::DisplayProjection projection;
+
+    Editor::LayoutEngine engine;
+    const qreal wideViewport = 1400.0;
+
+    // A. At 12pt (Adaptive -> 780px)
+    theme.setBasePointSize(12.0);
+    projection.buildProjection(root, buffer, 0, false);
+    engine.layout(projection, wideViewport);
+
+    QCOMPARE(engine.contentWidth(), 780.0);
+    qreal expectedLeft12 = (wideViewport - 780.0) / 2.0;
+    QCOMPARE(engine.contentLeft(), expectedLeft12);
+    qreal textLineWidth12 = engine.blocks()[1].layout->lineAt(0).width();
+
+    // B. At 16pt (Adaptive -> 1040px) with identical viewport 1400.0px
+    theme.setBasePointSize(16.0);
+    projection.buildProjection(root, buffer, 0, false);
+    engine.layout(projection, wideViewport);
+
+    QCOMPARE(engine.contentWidth(), 1040.0);
+    qreal expectedLeft16 = (wideViewport - 1040.0) / 2.0;
+    QCOMPARE(engine.contentLeft(), expectedLeft16);
+    qreal textLineWidth16 = engine.blocks()[1].layout->lineAt(0).width();
+
+    // Line wrap width must have expanded from ~772px to ~1032px
+    QVERIFY(textLineWidth16 > textLineWidth12 + 200.0);
+
+    // Assert exact mathematical equivalence with a fresh cold layout at 16pt
+    Editor::LayoutEngine coldEngine16;
+    coldEngine16.layout(projection, wideViewport);
+    QCOMPARE(engine.contentWidth(), coldEngine16.contentWidth());
+    QCOMPARE(engine.contentLeft(), coldEngine16.contentLeft());
+    QVERIFY(qAbs(engine.totalHeight() - coldEngine16.totalHeight()) < 0.001);
+
+    // --- 4. Small Viewport Constraint (No Horizontal Overflow) ---
+    const qreal smallViewport = 600.0;
+    engine.layout(projection, smallViewport);
+    QVERIFY(engine.contentWidth() <= smallViewport - 32.0);
+    QVERIFY(engine.contentLeft() >= 16.0);
+
+    // --- 5. MainWindow Menu Synchronization & QSettings Persistence ---
+    UI::MainWindow w1;
+    QVERIFY(w1.actWidthAdaptive() != nullptr);
+    QVERIFY(w1.actWidthNarrow() != nullptr);
+    QVERIFY(w1.actWidthStandard() != nullptr);
+    QVERIFY(w1.actWidthWide() != nullptr);
+
+    // Switch to Wide mode via action
+    w1.actWidthWide()->trigger();
+    QCOMPARE(theme.readingWidthMode(), Theme::ThemeManager::ReadingWidthMode::Wide);
+    QVERIFY(w1.actWidthWide()->isChecked());
+    QVERIFY(!w1.actWidthStandard()->isChecked());
+    QVERIFY(!w1.actWidthAdaptive()->isChecked());
+
+    QTemporaryDir tempPrefDir;
+    QSettings saveSettings(tempPrefDir.filePath(QStringLiteral("rw_pref.ini")), QSettings::IniFormat);
+    w1.savePreferences(&saveSettings);
+
+    // Second window loads preferences
+    theme.setReadingWidthMode(Theme::ThemeManager::ReadingWidthMode::Narrow); // tamper
+    UI::MainWindow w2;
+    w2.loadPreferences(&saveSettings);
+    QCOMPARE(theme.readingWidthMode(), Theme::ThemeManager::ReadingWidthMode::Wide);
+    QVERIFY(w2.actWidthWide()->isChecked());
+
+    // Clean restore
+    theme.setReadingWidthMode(Theme::ThemeManager::ReadingWidthMode::Adaptive);
+    theme.setBasePointSize(12.0);
 }
 
 QTEST_MAIN(TestProbes)

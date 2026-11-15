@@ -90,8 +90,20 @@ public:
     QFont fontSans(int pointSize = 11, int weight = QFont::Normal) const;
     QFont fontMono(int pointSize = 10, int weight = QFont::Normal) const;
 
-    // Reading column layout constants
-    static constexpr qreal maxReadingWidth() { return 780.0; }
+    // Reading column layout constants and mode
+    enum class ReadingWidthMode {
+        Adaptive,  // 自适应 (跟随字号动态缩放，默认)
+        Narrow,    // 窄 (640px)
+        Standard,  // 标准 (780px)
+        Wide       // 宽 (1040px)
+    };
+
+    ReadingWidthMode readingWidthMode() const { return m_readingWidthMode; }
+    void setReadingWidthMode(ReadingWidthMode mode);
+
+    qreal maxReadingWidth() const;
+    static qreal calculateAdaptiveReadingWidth(qreal pointSize);
+    static constexpr qreal defaultReadingWidth() { return 780.0; }
     static constexpr qreal topBreathingPadding() { return 56.0; }
     static constexpr qreal bottomBreathingPadding() { return 80.0; }
     static constexpr qreal sideMarginMin() { return 24.0; }
@@ -118,6 +130,7 @@ private:
     FontPreset m_fontPreset = FontPreset::SansSerif;
     QString m_customFontFamily;
     qreal m_basePointSize = 12.0;
+    ReadingWidthMode m_readingWidthMode = ReadingWidthMode::Adaptive;
 };
 
 inline const ColorPalette &currentPalette() {

@@ -252,6 +252,40 @@ void MainWindow::setupMenusAndToolbars() {
     });
     toggleThemeAct->setShortcut(QKeySequence(QStringLiteral("Ctrl+T")));
 
+    viewMenu->addSeparator();
+
+    // Reading Width Submenu
+    QMenu *widthMenu = viewMenu->addMenu(QStringLiteral("阅读宽度 (&W)"));
+    auto *widthGroup = new QActionGroup(this);
+
+    m_actWidthAdaptive = widthMenu->addAction(QStringLiteral("自适应 (跟随字号，默认)"));
+    m_actWidthAdaptive->setCheckable(true);
+    widthGroup->addAction(m_actWidthAdaptive);
+    connect(m_actWidthAdaptive, &QAction::triggered, []() {
+        Theme::ThemeManager::instance().setReadingWidthMode(Theme::ThemeManager::ReadingWidthMode::Adaptive);
+    });
+
+    m_actWidthNarrow = widthMenu->addAction(QStringLiteral("窄 (640px)"));
+    m_actWidthNarrow->setCheckable(true);
+    widthGroup->addAction(m_actWidthNarrow);
+    connect(m_actWidthNarrow, &QAction::triggered, []() {
+        Theme::ThemeManager::instance().setReadingWidthMode(Theme::ThemeManager::ReadingWidthMode::Narrow);
+    });
+
+    m_actWidthStandard = widthMenu->addAction(QStringLiteral("标准 (780px)"));
+    m_actWidthStandard->setCheckable(true);
+    widthGroup->addAction(m_actWidthStandard);
+    connect(m_actWidthStandard, &QAction::triggered, []() {
+        Theme::ThemeManager::instance().setReadingWidthMode(Theme::ThemeManager::ReadingWidthMode::Standard);
+    });
+
+    m_actWidthWide = widthMenu->addAction(QStringLiteral("宽 (1040px)"));
+    m_actWidthWide->setCheckable(true);
+    widthGroup->addAction(m_actWidthWide);
+    connect(m_actWidthWide, &QAction::triggered, []() {
+        Theme::ThemeManager::instance().setReadingWidthMode(Theme::ThemeManager::ReadingWidthMode::Wide);
+    });
+
     // Font / Typography Menu
     QMenu *fontMenu = mb->addMenu(QStringLiteral("字体 (&T)"));
     auto *fontGroup = new QActionGroup(this);
@@ -775,6 +809,12 @@ void MainWindow::updateTypographyMenu() {
     if (m_actSans) m_actSans->setChecked(preset == Theme::ThemeManager::FontPreset::SansSerif);
     if (m_actSerif) m_actSerif->setChecked(preset == Theme::ThemeManager::FontPreset::Serif);
     if (m_actMono) m_actMono->setChecked(preset == Theme::ThemeManager::FontPreset::Monospace);
+
+    auto rwMode = Theme::ThemeManager::instance().readingWidthMode();
+    if (m_actWidthAdaptive) m_actWidthAdaptive->setChecked(rwMode == Theme::ThemeManager::ReadingWidthMode::Adaptive);
+    if (m_actWidthNarrow) m_actWidthNarrow->setChecked(rwMode == Theme::ThemeManager::ReadingWidthMode::Narrow);
+    if (m_actWidthStandard) m_actWidthStandard->setChecked(rwMode == Theme::ThemeManager::ReadingWidthMode::Standard);
+    if (m_actWidthWide) m_actWidthWide->setChecked(rwMode == Theme::ThemeManager::ReadingWidthMode::Wide);
 }
 
 void MainWindow::loadPreferences(QSettings *settings) {

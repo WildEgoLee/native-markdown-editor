@@ -53,6 +53,7 @@ NativeEditorView::NativeEditorView(QWidget *parent)
             }
         }
 
+        m_layoutEngine.invalidateLayout();
         m_projection.buildProjection(m_rootNode, m_buffer, m_cursorPos, m_isSourceMode);
         m_layoutEngine.layout(m_projection, viewport()->width());
         updateScrollBars();

@@ -54,6 +54,13 @@ void ThemeManager::loadSettings(QSettings *settings) {
         } else {
             setBasePointSize(12.0);
         }
+
+        int rwMode = s.value(QStringLiteral("Appearance/readingWidthMode"), static_cast<int>(ReadingWidthMode::Adaptive)).toInt();
+        if (rwMode >= 0 && rwMode <= 3) {
+            setReadingWidthMode(static_cast<ReadingWidthMode>(rwMode));
+        } else {
+            setReadingWidthMode(ReadingWidthMode::Adaptive);
+        }
     };
 
     if (settings) {
@@ -70,6 +77,7 @@ void ThemeManager::saveSettings(QSettings *settings) {
         s.setValue(QStringLiteral("Appearance/fontPreset"), static_cast<int>(m_fontPreset));
         s.setValue(QStringLiteral("Appearance/customFontFamily"), m_customFontFamily);
         s.setValue(QStringLiteral("Appearance/basePointSize"), m_basePointSize);
+        s.setValue(QStringLiteral("Appearance/readingWidthMode"), static_cast<int>(m_readingWidthMode));
     };
 
     if (settings) {
@@ -256,6 +264,32 @@ void ThemeManager::zoomOut() {
 
 void ThemeManager::resetZoom() {
     setBasePointSize(12.0);
+}
+
+void ThemeManager::setReadingWidthMode(ReadingWidthMode mode) {
+    if (m_readingWidthMode != mode) {
+        m_readingWidthMode = mode;
+        emit typographyChanged();
+    }
+}
+
+qreal ThemeManager::calculateAdaptiveReadingWidth(qreal pointSize) {
+    qreal w = 780.0 * (pointSize / 12.0);
+    return std::clamp(w, 640.0, 1120.0);
+}
+
+qreal ThemeManager::maxReadingWidth() const {
+    switch (m_readingWidthMode) {
+    case ReadingWidthMode::Narrow:
+        return 640.0;
+    case ReadingWidthMode::Standard:
+        return 780.0;
+    case ReadingWidthMode::Wide:
+        return 1040.0;
+    case ReadingWidthMode::Adaptive:
+    default:
+        return calculateAdaptiveReadingWidth(m_basePointSize);
+    }
 }
 
 QFont ThemeManager::fontSans(int pointSize, int weight) const {

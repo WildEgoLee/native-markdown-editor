@@ -236,6 +236,15 @@ bool LayoutEngine::isBlockLayoutEqual(const Mapping::VisualBlock &vBlock,
     return true;
 }
 
+void LayoutEngine::invalidateLayout() {
+    m_lastViewportWidth = -1;
+    m_lastContentWidth = -1;
+    m_lastBasePointSize = -1;
+    m_lastFontPreset = -1;
+    m_lastCustomFont.clear();
+    m_blocks.clear();
+}
+
 void LayoutEngine::layout(const Mapping::DisplayProjection &projection,
                           qreal contentWidth,
                           int preeditOffset,
@@ -245,14 +254,12 @@ void LayoutEngine::layout(const Mapping::DisplayProjection &projection,
     if (vBlocks.isEmpty()) {
         m_blocks.clear();
         m_totalHeight = 0;
-        m_lastWidth = contentWidth;
+        m_lastViewportWidth = contentWidth;
+        m_lastContentWidth = 0;
         return;
     }
 
-    bool canReuse = (m_lastWidth > 0 && contentWidth == m_lastWidth && !m_blocks.isEmpty());
-    m_lastWidth = contentWidth;
-
-    qreal maxW = Theme::ThemeManager::maxReadingWidth();
+    qreal maxW = Theme::ThemeManager::instance().maxReadingWidth();
     qreal sidePad = Theme::ThemeManager::sideMarginMin();
 
     if (contentWidth > maxW + sidePad * 2.0) {
@@ -262,6 +269,23 @@ void LayoutEngine::layout(const Mapping::DisplayProjection &projection,
         m_contentLeft = qMax(16.0, qMin(24.0, (contentWidth - 100.0) / 2.0));
         m_contentWidth = qMax(100.0, contentWidth - m_contentLeft * 2.0);
     }
+
+    qreal currentPt = Theme::ThemeManager::instance().basePointSize();
+    int currentPreset = static_cast<int>(Theme::ThemeManager::instance().fontPreset());
+    const QString &currentCustomFont = Theme::ThemeManager::instance().customFontFamily();
+
+    bool widthMatch = (m_lastViewportWidth > 0 && contentWidth == m_lastViewportWidth && m_contentWidth == m_lastContentWidth);
+    bool typographyMatch = (std::abs(currentPt - m_lastBasePointSize) < 0.01 &&
+                            currentPreset == m_lastFontPreset &&
+                            currentCustomFont == m_lastCustomFont);
+
+    bool canReuse = (widthMatch && typographyMatch && !m_blocks.isEmpty());
+
+    m_lastViewportWidth = contentWidth;
+    m_lastContentWidth = m_contentWidth;
+    m_lastBasePointSize = currentPt;
+    m_lastFontPreset = currentPreset;
+    m_lastCustomFont = currentCustomFont;
 
     const int N = vBlocks.size();
     const int M = m_blocks.size();

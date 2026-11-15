@@ -74,6 +74,7 @@ SidebarWidget::SidebarWidget(QWidget *parent)
     : QWidget(parent)
 {
     setObjectName(QStringLiteral("sidebarContainer"));
+    setMinimumWidth(100);
 
     auto mainLayout = new QVBoxLayout(this);
     mainLayout->setContentsMargins(0, 0, 0, 0);
@@ -81,13 +82,15 @@ SidebarWidget::SidebarWidget(QWidget *parent)
 
     // Header container with Segmented Control and Search Input
     auto headerContainer = new QWidget(this);
+    headerContainer->setMinimumWidth(80);
     auto headerLayout = new QVBoxLayout(headerContainer);
-    headerLayout->setContentsMargins(10, 10, 10, 4);
+    headerLayout->setContentsMargins(8, 8, 8, 4);
     headerLayout->setSpacing(8);
 
     // Segmented Control Pill Bar
     m_segmentedFrame = new QFrame(headerContainer);
     m_segmentedFrame->setObjectName(QStringLiteral("segmentedControl"));
+    m_segmentedFrame->setMinimumWidth(80);
     auto segLayout = new QHBoxLayout(m_segmentedFrame);
     segLayout->setContentsMargins(2, 2, 2, 2);
     segLayout->setSpacing(2);
@@ -117,6 +120,7 @@ SidebarWidget::SidebarWidget(QWidget *parent)
     m_searchEdit->setObjectName(QStringLiteral("sidebarSearch"));
     m_searchEdit->setPlaceholderText(QStringLiteral("搜索大纲 / 目录 / 历史..."));
     m_searchEdit->setClearButtonEnabled(true);
+    m_searchEdit->setMinimumWidth(80);
     headerLayout->addWidget(m_searchEdit);
 
     mainLayout->addWidget(headerContainer);

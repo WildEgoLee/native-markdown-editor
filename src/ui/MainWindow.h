@@ -51,6 +51,8 @@ public slots:
     void updateRecentFilesMenu();
 
 protected:
+    void showEvent(QShowEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dragMoveEvent(QDragMoveEvent *event) override;
@@ -113,6 +115,8 @@ private:
 
     QMenu *m_recentMenu = nullptr;
     QStringList m_recentFiles;
+    int m_targetSidebarWidth = 260;
+    bool m_initialSplitterSet = false;
 };
 
 } // namespace MarkdownTool::UI

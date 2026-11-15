@@ -103,6 +103,7 @@ private slots:
     void testFontDialogThemeAndLegibility();
     void testRecentFilesHistoryPersistenceAndMenu();
     void testAdaptiveReadingWidthAndTypographyReflow();
+    void testMarkdownTableNativeLayoutAndInteraction();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempSettingsDir;
@@ -4299,6 +4300,113 @@ void TestProbes::testAdaptiveReadingWidthAndTypographyReflow() {
     // Clean restore
     theme.setReadingWidthMode(Theme::ThemeManager::ReadingWidthMode::Adaptive);
     theme.setBasePointSize(12.0);
+}
+
+void TestProbes::testMarkdownTableNativeLayoutAndInteraction() {
+    Parser::MarkdownParserAdapter parser;
+    Core::TextBuffer buffer;
+    buffer.setText(QStringLiteral(
+        "# GFM 表格排版验证\n\n"
+        "| 数据点 | 数值 | 来源 |\n"
+        "| :--- | :---: | ---: |\n"
+        "| 信号 A | 98.5% | 核心引擎 |\n"
+        "| 信号 B | 1024 | 缓存监控 |\n\n"
+        "这是表格下方的后续段落。\n"
+    ));
+
+    // 1. Semantic AST Verification
+    auto root = parser.parse(buffer);
+    QVERIFY(root != nullptr);
+    QCOMPARE(root->children.size(), 3); // Heading, Table, Paragraph
+
+    auto tableNode = root->children[1];
+    QCOMPARE(tableNode->type, Parser::NodeType::Table);
+    QCOMPARE(tableNode->tableColumnCount, 3);
+    QCOMPARE(tableNode->tableAlignments.size(), 3);
+    QCOMPARE(tableNode->tableAlignments[0], static_cast<uint8_t>('l'));
+    QCOMPARE(tableNode->tableAlignments[1], static_cast<uint8_t>('c'));
+    QCOMPARE(tableNode->tableAlignments[2], static_cast<uint8_t>('r'));
+
+    QCOMPARE(tableNode->children.size(), 3); // Header row, row 1, row 2
+    QVERIFY(tableNode->children[0]->isTableHeader);
+    QCOMPARE(tableNode->children[0]->children.size(), 3); // 3 cells in header
+    QCOMPARE(tableNode->children[1]->children.size(), 3); // 3 cells in row 1
+
+    // 2. DisplayProjection Verification (Live Preview Mode)
+    Mapping::DisplayProjection projection;
+    projection.buildProjection(root, buffer, 0, false);
+    QCOMPARE(projection.blocks().size(), 3);
+
+    const auto &tableBlock = projection.blocks()[1];
+    QVERIFY(tableBlock.isTableBlock);
+    QCOMPARE(tableBlock.tableData.colCount, 3);
+    QCOMPARE(tableBlock.tableData.rows.size(), 3);
+    QVERIFY(tableBlock.tableData.rows[0].isHeader);
+    QCOMPARE(tableBlock.tableData.rows[0].cells[0].text, QStringLiteral("数据点"));
+    QCOMPARE(tableBlock.tableData.rows[0].cells[1].text, QStringLiteral("数值"));
+    QCOMPARE(tableBlock.tableData.rows[0].cells[2].text, QStringLiteral("来源"));
+    QCOMPARE(tableBlock.tableData.rows[1].cells[0].text, QStringLiteral("信号 A"));
+    QCOMPARE(tableBlock.tableData.rows[1].cells[1].text, QStringLiteral("98.5%"));
+    QCOMPARE(tableBlock.tableData.rows[1].cells[2].text, QStringLiteral("核心引擎"));
+
+    // Verify cell alignments in projection
+    QCOMPARE(tableBlock.tableData.rows[0].cells[0].alignment, Qt::AlignLeft);
+    QCOMPARE(tableBlock.tableData.rows[0].cells[1].alignment, Qt::AlignCenter);
+    QCOMPARE(tableBlock.tableData.rows[0].cells[2].alignment, Qt::AlignRight);
+
+    // 3. LayoutEngine Verification
+    Editor::LayoutEngine engine;
+    const qreal viewportW = 1200.0;
+    engine.layout(projection, viewportW);
+
+    const auto &layoutBlocks = engine.blocks();
+    QCOMPARE(layoutBlocks.size(), 3);
+    const auto &bData = layoutBlocks[1];
+    QVERIFY(bData.isTableBlock);
+    QCOMPARE(bData.tableLayout.colCount, 3);
+    QCOMPARE(bData.tableLayout.colWidths.size(), 3);
+    QCOMPARE(bData.tableLayout.rows.size(), 3);
+
+    // Columns must fill contentWidth
+    qreal sumColW = 0.0;
+    for (qreal w : bData.tableLayout.colWidths) sumColW += w;
+    QVERIFY(qAbs(sumColW - engine.contentWidth()) < 0.5);
+
+    // Header row and data rows must have valid heights and cell rectangles
+    for (int r = 0; r < 3; ++r) {
+        const auto &row = bData.tableLayout.rows[r];
+        QVERIFY(row.rect.height() >= 34.0);
+        QCOMPARE(row.cells.size(), 3);
+        for (int c = 0; c < 3; ++c) {
+            const auto &cell = row.cells[c];
+            QVERIFY(cell.rect.isValid());
+            QVERIFY(cell.layout != nullptr);
+            QCOMPARE(cell.rect.width(), bData.tableLayout.colWidths[c]);
+        }
+    }
+
+    // 4. Hit-testing and Cursor Positioning in Table Cells
+    int targetSourceOffset = buffer.text().indexOf(QStringLiteral("98.5%"));
+    QVERIFY(targetSourceOffset > 0);
+
+    QRectF cRect = engine.cursorRect(targetSourceOffset, projection);
+    QVERIFY(cRect.isValid());
+    // Cursor must fall inside row 1, cell 1
+    const auto &cell11 = bData.tableLayout.rows[1].cells[1];
+    QVERIFY(cRect.left() >= cell11.rect.left());
+    QVERIFY(cRect.right() <= cell11.rect.right() + 5.0);
+    QVERIFY(cRect.top() >= cell11.rect.top());
+    QVERIFY(cRect.bottom() <= cell11.rect.bottom());
+
+    // Hit-testing the center of that cell must return offset near or inside "98.5%"
+    int hitOffset = engine.hitTest(cell11.rect.center(), projection);
+    QVERIFY(hitOffset >= cell11.sourceRange.start && hitOffset <= cell11.sourceRange.end);
+
+    // 5. Sidebar default width verification (P2)
+    UI::MainWindow mw;
+    mw.show();
+    QTest::qWait(50);
+    QCOMPARE(mw.findChild<QSplitter*>()->sizes().value(0), 260);
 }
 
 QTEST_MAIN(TestProbes)

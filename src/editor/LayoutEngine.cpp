@@ -53,6 +53,142 @@ void LayoutEngine::layoutSingleBlock(const Mapping::VisualBlock &vBlock,
         return;
     }
 
+    // Real Table Layout (Live Preview Mode)
+    if (vBlock.isTableBlock && !vBlock.tableData.rows.isEmpty()) {
+        bData.isTableBlock = true;
+        currentY += vBlock.marginTop;
+
+        const auto &tableData = vBlock.tableData;
+        int numRows = tableData.rows.size();
+        int numCols = tableData.colCount;
+        if (numCols <= 0) {
+            for (const auto &r : tableData.rows) {
+                numCols = qMax(numCols, r.cells.size());
+            }
+        }
+        numCols = qMax(1, numCols);
+        bData.tableLayout.colCount = numCols;
+
+        // 1. Measure natural column widths
+        QVector<qreal> naturalColWidths(numCols, 60.0);
+        QFont headerFont = Theme::ThemeManager::instance().fontSans(static_cast<int>(Theme::ThemeManager::instance().basePointSize()), QFont::Bold);
+        QFont normalFont = Theme::ThemeManager::instance().fontSans(static_cast<int>(Theme::ThemeManager::instance().basePointSize()), QFont::Normal);
+        QFontMetricsF fmHeader(headerFont);
+        QFontMetricsF fmNormal(normalFont);
+
+        for (int r = 0; r < numRows; ++r) {
+            const auto &row = tableData.rows[r];
+            const auto &fm = row.isHeader ? fmHeader : fmNormal;
+            for (int c = 0; c < row.cells.size() && c < numCols; ++c) {
+                qreal w = fm.horizontalAdvance(row.cells[c].text) + 24.0;
+                naturalColWidths[c] = qMax(naturalColWidths[c], w);
+            }
+        }
+
+        // 2. Distribute available content width (m_contentWidth)
+        qreal totalNatural = 0.0;
+        for (qreal w : naturalColWidths) totalNatural += w;
+
+        QVector<qreal> colWidths(numCols, 60.0);
+        if (totalNatural <= m_contentWidth && totalNatural > 0.0) {
+            for (int c = 0; c < numCols; ++c) {
+                colWidths[c] = (naturalColWidths[c] / totalNatural) * m_contentWidth;
+            }
+        } else {
+            for (int c = 0; c < numCols; ++c) {
+                qreal ratio = (totalNatural > 0.0) ? (naturalColWidths[c] / totalNatural) : (1.0 / numCols);
+                colWidths[c] = qMax(60.0, ratio * m_contentWidth);
+            }
+        }
+        bData.tableLayout.colWidths = colWidths;
+
+        // 3. Lay out rows and cells
+        qreal rowY = currentY;
+        bData.tableLayout.rows.reserve(numRows);
+
+        for (int r = 0; r < numRows; ++r) {
+            const auto &vRow = tableData.rows[r];
+            TableRowLayout rowLayout;
+            rowLayout.isHeader = vRow.isHeader;
+            rowLayout.cells.reserve(numCols);
+
+            qreal maxRowH = 34.0;
+
+            for (int c = 0; c < numCols; ++c) {
+                TableCellLayout cellLayout;
+                cellLayout.isHeader = vRow.isHeader;
+                if (c < vRow.cells.size()) {
+                    cellLayout.sourceRange = vRow.cells[c].sourceRange;
+                    cellLayout.alignment = vRow.cells[c].alignment;
+                    cellLayout.visualStart = vRow.cells[c].visualStart;
+                    cellLayout.visualLength = vRow.cells[c].visualLength;
+                }
+
+                qreal cellX = m_contentLeft;
+                for (int i = 0; i < c; ++i) {
+                    cellX += colWidths[i];
+                }
+                qreal cellW = colWidths[c];
+
+                cellLayout.layout = std::make_shared<QTextLayout>();
+                QString text = (c < vRow.cells.size()) ? vRow.cells[c].text : QString();
+                cellLayout.layout->setText(text);
+                cellLayout.layout->setFont(vRow.isHeader ? headerFont : normalFont);
+
+                QTextOption opt;
+                opt.setAlignment(cellLayout.alignment);
+                opt.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+                cellLayout.layout->setTextOption(opt);
+
+                qreal innerW = qMax(20.0, cellW - 20.0);
+                cellLayout.layout->beginLayout();
+                qreal lineY = 0;
+                while (true) {
+                    QTextLine line = cellLayout.layout->createLine();
+                    if (!line.isValid()) break;
+                    line.setLineWidth(innerW);
+                    line.setPosition(QPointF(0, lineY));
+                    lineY += line.height();
+                }
+                cellLayout.layout->endLayout();
+
+                qreal cellH = lineY + 16.0;
+                maxRowH = qMax(maxRowH, cellH);
+
+                rowLayout.cells.append(std::move(cellLayout));
+            }
+
+            rowLayout.rect = QRectF(m_contentLeft, rowY, m_contentWidth, maxRowH);
+            for (int c = 0; c < rowLayout.cells.size(); ++c) {
+                qreal cellX = m_contentLeft;
+                for (int i = 0; i < c; ++i) cellX += colWidths[i];
+                rowLayout.cells[c].rect = QRectF(cellX, rowY, colWidths[c], maxRowH);
+            }
+
+            rowY += maxRowH;
+            bData.tableLayout.rows.append(std::move(rowLayout));
+        }
+
+        qreal totalTableH = rowY - currentY;
+        bData.rect = QRectF(m_contentLeft, currentY, m_contentWidth, totalTableH);
+        bData.tableLayout.tableRect = bData.rect;
+        currentY += totalTableH + vBlock.marginBottom;
+
+        bData.cachedText = vBlock.visualText;
+        bData.cachedSegments = vBlock.segments;
+        bData.cachedIndentLevel = vBlock.indentLevel;
+        bData.cachedHeadingLevel = vBlock.headingLevel;
+        bData.cachedMarginTop = vBlock.marginTop;
+        bData.cachedMarginBottom = vBlock.marginBottom;
+        bData.cachedIsQuote = vBlock.isQuote;
+        bData.cachedIsCodeBlock = vBlock.isCodeBlock;
+        bData.cachedBlockType = vBlock.blockType;
+        bData.hasIme = false;
+
+        m_blocks.append(std::move(bData));
+        return;
+    }
+
     bData.layout = std::make_shared<QTextLayout>();
 
     QString lineText = vBlock.visualText;
@@ -167,6 +303,8 @@ void LayoutEngine::reuseBlock(const BlockLayoutData &src,
     bData.layout = src.layout; // Direct reuse without text shaping or line layout
     bData.isMathBlock = src.isMathBlock;
     bData.isMermaidBlock = src.isMermaidBlock;
+    bData.isTableBlock = src.isTableBlock;
+    bData.tableLayout = src.tableLayout;
     bData.isInteractiveActive = src.isInteractiveActive;
     bData.embeddedSource = src.embeddedSource;
     bData.cachedText = src.cachedText;
@@ -182,9 +320,19 @@ void LayoutEngine::reuseBlock(const BlockLayoutData &src,
 
     currentY += vBlock.marginTop;
     qreal h = src.rect.height();
+    qreal dy = currentY - src.rect.top();
     bData.rect = QRectF(m_contentLeft, currentY, m_contentWidth, h);
     if (!src.embeddedPreviewRect.isEmpty()) {
         bData.embeddedPreviewRect = QRectF(m_contentLeft, currentY + (src.embeddedPreviewRect.top() - src.rect.top()), m_contentWidth, src.embeddedPreviewRect.height());
+    }
+    if (bData.isTableBlock) {
+        bData.tableLayout.tableRect = bData.rect;
+        for (auto &row : bData.tableLayout.rows) {
+            row.rect.translate(0, dy);
+            for (auto &cell : row.cells) {
+                cell.rect.translate(0, dy);
+            }
+        }
     }
     currentY += h + vBlock.marginBottom;
 
@@ -200,12 +348,13 @@ bool LayoutEngine::isBlockLayoutEqual(const Mapping::VisualBlock &vBlock,
     }
     if (prevData.isMathBlock != vBlock.isMathBlock ||
         prevData.isMermaidBlock != vBlock.isMermaidBlock ||
+        prevData.isTableBlock != vBlock.isTableBlock ||
         prevData.isInteractiveActive != vBlock.isInteractiveActive ||
         prevData.embeddedSource != vBlock.embeddedSource)
     {
         return false;
     }
-    if (!prevData.layout && (!prevData.isMathBlock && !prevData.isMermaidBlock)) {
+    if (!prevData.layout && (!prevData.isMathBlock && !prevData.isMermaidBlock && !prevData.isTableBlock)) {
         return false;
     }
     if (prevData.cachedText != vBlock.visualText ||
@@ -368,6 +517,38 @@ int LayoutEngine::hitTest(const QPointF &point, const Mapping::DisplayProjection
     const auto &bData = m_blocks[targetIndex];
     const auto &vBlock = vBlocks[bData.visualBlockIndex];
 
+    if (bData.isTableBlock) {
+        for (const auto &row : bData.tableLayout.rows) {
+            if (point.y() >= row.rect.top() && point.y() <= row.rect.bottom()) {
+                for (const auto &cell : row.cells) {
+                    if (point.x() >= cell.rect.left() && point.x() <= cell.rect.right()) {
+                        if (cell.layout && cell.layout->lineCount() > 0) {
+                            qreal cellContentH = cell.layout->boundingRect().height();
+                            qreal textY = cell.rect.top() + (cell.rect.height() - cellContentH) / 2.0;
+                            qreal relY = point.y() - textY;
+                            qreal relX = point.x() - (cell.rect.left() + 10.0);
+                            QTextLine line;
+                            for (int l = 0; l < cell.layout->lineCount(); ++l) {
+                                QTextLine curLine = cell.layout->lineAt(l);
+                                if (relY >= curLine.y() && relY <= curLine.y() + curLine.height()) {
+                                    line = curLine;
+                                    break;
+                                }
+                            }
+                            if (!line.isValid()) {
+                                line = cell.layout->lineAt(0);
+                            }
+                            int cursorOffset = line.xToCursor(relX);
+                            return qBound(cell.sourceRange.start, cell.sourceRange.start + cursorOffset, cell.sourceRange.end);
+                        }
+                        return cell.sourceRange.start;
+                    }
+                }
+            }
+        }
+        return vBlock.sourceRange.start;
+    }
+
     if (!bData.layout || vBlock.visualText.isEmpty()) {
         return vBlock.sourceRange.start;
     }
@@ -408,6 +589,28 @@ QRectF LayoutEngine::cursorRect(int sourceOffset, const Mapping::DisplayProjecti
 
     const auto &bData = m_blocks[blockIdx];
     const auto &vBlock = vBlocks[bData.visualBlockIndex];
+
+    if (bData.isTableBlock) {
+        for (const auto &row : bData.tableLayout.rows) {
+            for (const auto &cell : row.cells) {
+                if (cell.sourceRange.contains(sourceOffset) || sourceOffset == cell.sourceRange.end) {
+                    if (cell.layout && cell.layout->lineCount() > 0) {
+                        qreal cellContentH = cell.layout->boundingRect().height();
+                        qreal textY = cell.rect.top() + (cell.rect.height() - cellContentH) / 2.0;
+                        int relOffset = sourceOffset - cell.sourceRange.start;
+                        QTextLine line = cell.layout->lineForTextPosition(relOffset);
+                        if (!line.isValid()) {
+                            line = cell.layout->lineAt(0);
+                        }
+                        qreal cursorX = cell.rect.left() + 10.0 + line.cursorToX(relOffset);
+                        qreal cursorY = textY + line.y();
+                        return QRectF(cursorX, cursorY, 2, line.height());
+                    }
+                    return QRectF(cell.rect.left() + 10.0, cell.rect.top() + 6.0, 2, 20);
+                }
+            }
+        }
+    }
 
     int visualOffset = vBlock.sourceToVisual(sourceOffset);
 
@@ -520,6 +723,100 @@ void LayoutEngine::paint(QPainter *painter,
                 painter->restore();
                 continue; // Do not draw code text when collapsed
             }
+        }
+
+        // Draw Table Component (Live Preview Mode)
+        if (bData.isTableBlock) {
+            painter->save();
+            painter->setRenderHint(QPainter::Antialiasing, true);
+
+            QRectF tableRect = bData.tableLayout.tableRect;
+
+            // 1. Outer rounded container
+            painter->setPen(QPen(palette.tableBorder, 1.0));
+            painter->setBrush(palette.editorBackground);
+            painter->drawRoundedRect(tableRect, 6.0, 6.0);
+
+            // 2. Draw Rows (Header background & Dividers)
+            for (int r = 0; r < bData.tableLayout.rows.size(); ++r) {
+                const auto &row = bData.tableLayout.rows[r];
+
+                if (row.isHeader) {
+                    // Header background
+                    QPainterPath headerPath;
+                    headerPath.addRoundedRect(tableRect, 6.0, 6.0);
+                    QRectF headerClipRect(tableRect.left(), tableRect.top(), tableRect.width(), row.rect.height());
+                    painter->save();
+                    painter->setClipRect(headerClipRect);
+                    painter->setPen(Qt::NoPen);
+                    painter->setBrush(palette.tableCellBackground);
+                    painter->drawPath(headerPath);
+                    painter->restore();
+
+                    // Header bottom border
+                    painter->setPen(QPen(palette.tableBorder, 1.5));
+                    painter->drawLine(QPointF(tableRect.left(), row.rect.bottom()),
+                                     QPointF(tableRect.right(), row.rect.bottom()));
+                } else {
+                    // Row bottom divider
+                    painter->setPen(QPen(palette.tableBorder, 0.8));
+                    painter->drawLine(QPointF(tableRect.left(), row.rect.bottom()),
+                                     QPointF(tableRect.right(), row.rect.bottom()));
+                }
+
+                // 3. Draw Cells Text & Selection
+                for (int c = 0; c < row.cells.size(); ++c) {
+                    const auto &cell = row.cells[c];
+                    if (!cell.layout) continue;
+
+                    qreal cellContentH = cell.layout->boundingRect().height();
+                    qreal textY = cell.rect.top() + (cell.rect.height() - cellContentH) / 2.0;
+
+                    // Draw selection in cell if any
+                    if (!selections.isEmpty() && cell.sourceRange.isValid()) {
+                        for (const auto &sel : selections) {
+                            if (!sel.hasSelection()) continue;
+                            int selS = qMax(sel.selectionStart(), cell.sourceRange.start);
+                            int selE = qMin(sel.selectionEnd(), cell.sourceRange.end);
+                            if (selS < selE) {
+                                int relS = selS - cell.sourceRange.start;
+                                int relE = selE - cell.sourceRange.start;
+                                painter->setPen(Qt::NoPen);
+                                painter->setBrush(palette.selectionHighlight);
+                                for (int l = 0; l < cell.layout->lineCount(); ++l) {
+                                    QTextLine line = cell.layout->lineAt(l);
+                                    int lStart = line.textStart();
+                                    int lEnd = lStart + line.textLength();
+                                    int s = qMax(relS, lStart);
+                                    int e = qMin(relE, lEnd);
+                                    if (s < e) {
+                                        qreal x1 = cell.rect.left() + 10.0 + line.cursorToX(s);
+                                        qreal x2 = cell.rect.left() + 10.0 + line.cursorToX(e);
+                                        QRectF selR(qMin(x1, x2), textY + line.y(), qAbs(x2 - x1), line.height());
+                                        painter->drawRect(selR);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Draw cell text
+                    painter->setPen(palette.primaryText);
+                    cell.layout->draw(painter, QPointF(cell.rect.left() + 10.0, textY));
+                }
+            }
+
+            // 4. Vertical column divider lines
+            qreal curColX = tableRect.left();
+            painter->setPen(QPen(palette.tableBorder, 0.8));
+            for (int c = 0; c < bData.tableLayout.colWidths.size() - 1; ++c) {
+                curColX += bData.tableLayout.colWidths[c];
+                painter->drawLine(QPointF(curColX, tableRect.top()),
+                                 QPointF(curColX, tableRect.bottom()));
+            }
+
+            painter->restore();
+            continue;
         }
 
         // Draw block specific decorations

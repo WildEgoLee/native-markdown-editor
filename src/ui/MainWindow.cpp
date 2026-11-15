@@ -23,6 +23,7 @@ namespace MarkdownTool::UI {
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
+    resize(1100, 750);
     setupUi();
     setupActions();
     setupMenusAndToolbars();
@@ -36,7 +37,7 @@ MainWindow::MainWindow(QWidget *parent)
     updateThemeStyles();
     connect(&Theme::ThemeManager::instance(), &Theme::ThemeManager::themeChanged, this, &MainWindow::updateThemeStyles);
 
-    resize(1100, 750);
+    m_splitter->setSizes({260, 840});
 }
 
 MainWindow::~MainWindow() = default;
@@ -61,9 +62,9 @@ void MainWindow::setupUi() {
 
     m_splitter->addWidget(m_sidebar);
     m_splitter->addWidget(editorContainer);
-    m_splitter->setStretchFactor(0, 1);
-    m_splitter->setStretchFactor(1, 4);
-    m_splitter->setSizes({240, 860});
+    m_splitter->setStretchFactor(0, 0);
+    m_splitter->setStretchFactor(1, 1);
+    m_splitter->setSizes({260, 840});
 
     setCentralWidget(m_splitter);
 
@@ -741,6 +742,22 @@ bool MainWindow::maybeSave() {
     return true;
 }
 
+void MainWindow::showEvent(QShowEvent *event) {
+    QMainWindow::showEvent(event);
+    if (!m_initialSplitterSet && width() > 300) {
+        m_initialSplitterSet = true;
+        m_splitter->setSizes({m_targetSidebarWidth, qMax(100, width() - m_targetSidebarWidth)});
+    }
+}
+
+void MainWindow::resizeEvent(QResizeEvent *event) {
+    QMainWindow::resizeEvent(event);
+    if (!m_initialSplitterSet && width() > 300) {
+        m_initialSplitterSet = true;
+        m_splitter->setSizes({m_targetSidebarWidth, qMax(100, width() - m_targetSidebarWidth)});
+    }
+}
+
 void MainWindow::closeEvent(QCloseEvent *event) {
     if (maybeSave()) {
         savePreferences();
@@ -847,9 +864,12 @@ void MainWindow::loadPreferences(QSettings *settings) {
         bool sidebarVisible = s.value(QStringLiteral("window/sidebarVisible"), true).toBool();
         m_sidebar->setVisible(sidebarVisible);
 
-        int sidebarWidth = s.value(QStringLiteral("window/sidebarWidth"), 240).toInt();
-        sidebarWidth = std::clamp(sidebarWidth, 100, 800);
-        m_splitter->setSizes({sidebarWidth, qMax(200, width() - sidebarWidth)});
+        m_targetSidebarWidth = s.value(QStringLiteral("window/sidebarWidth"), 260).toInt();
+        m_targetSidebarWidth = std::clamp(m_targetSidebarWidth, 100, 800);
+        if (width() > 300) {
+            m_splitter->setSizes({m_targetSidebarWidth, qMax(200, width() - m_targetSidebarWidth)});
+            m_initialSplitterSet = true;
+        }
 
         m_recentFiles = s.value(QStringLiteral("history/recentFiles")).toStringList();
         updateRecentFilesMenu();
@@ -873,7 +893,7 @@ void MainWindow::savePreferences(QSettings *settings) {
         Theme::ThemeManager::instance().saveSettings(&s);
         s.setValue(QStringLiteral("window/geometry"), saveGeometry());
         s.setValue(QStringLiteral("window/sidebarVisible"), m_sidebar->isVisible());
-        s.setValue(QStringLiteral("window/sidebarWidth"), m_splitter->sizes().value(0, 240));
+        s.setValue(QStringLiteral("window/sidebarWidth"), m_splitter->sizes().value(0, 260));
         s.setValue(QStringLiteral("history/recentFiles"), m_recentFiles);
     };
 

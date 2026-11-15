@@ -12,6 +12,29 @@
 
 namespace MarkdownTool::Editor {
 
+struct TableCellLayout {
+    QRectF rect;
+    std::shared_ptr<QTextLayout> layout;
+    Core::SourceRange sourceRange;
+    int visualStart = 0;
+    int visualLength = 0;
+    Qt::AlignmentFlag alignment = Qt::AlignLeft;
+    bool isHeader = false;
+};
+
+struct TableRowLayout {
+    QRectF rect;
+    QVector<TableCellLayout> cells;
+    bool isHeader = false;
+};
+
+struct TableBlockLayout {
+    QVector<TableRowLayout> rows;
+    QVector<qreal> colWidths;
+    QRectF tableRect;
+    int colCount = 0;
+};
+
 struct BlockLayoutData {
     QRectF rect;
     std::shared_ptr<QTextLayout> layout;
@@ -35,6 +58,10 @@ struct BlockLayoutData {
     bool isInteractiveActive = false;
     QString embeddedSource;
     QRectF embeddedPreviewRect;
+
+    // Table Component data
+    bool isTableBlock = false;
+    TableBlockLayout tableLayout;
 };
 
 class LayoutEngine {

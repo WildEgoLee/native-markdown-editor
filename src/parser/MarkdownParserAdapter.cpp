@@ -270,8 +270,19 @@ static SemanticNodePtr convertNode(cmark_node *node, const Core::TextBuffer &buf
             }
         } else if (typeStr == QStringLiteral("table")) {
             semNode->type = NodeType::Table;
-        } else if (typeStr == QStringLiteral("table_row")) {
+            uint16_t cols = cmark_gfm_extensions_get_table_columns(node);
+            uint8_t *aligns = cmark_gfm_extensions_get_table_alignments(node);
+            semNode->tableColumnCount = cols;
+            if (aligns && cols > 0) {
+                semNode->tableAlignments.resize(cols);
+                for (int c = 0; c < cols; ++c) {
+                    semNode->tableAlignments[c] = aligns[c];
+                }
+            }
+        } else if (typeStr == QStringLiteral("table_row") || typeStr == QStringLiteral("table_header")) {
             semNode->type = NodeType::TableRow;
+            semNode->isTableHeader = (typeStr == QStringLiteral("table_header")) ||
+                                     (cmark_gfm_extensions_get_table_row_is_header(node) != 0);
         } else if (typeStr == QStringLiteral("table_cell")) {
             semNode->type = NodeType::TableCell;
         } else {

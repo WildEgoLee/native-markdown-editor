@@ -673,7 +673,7 @@ QPushButton#segmentBtn {
     color: %4;
     font-size: 12.5px;
     font-weight: 500;
-    padding: 5px 12px;
+    padding: 5px 6px;
 }
 
 QPushButton#segmentBtn:hover {

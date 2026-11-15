@@ -29,6 +29,28 @@ struct VisualSegment {
     bool isInteractive = false;
 };
 
+struct TableCellVisual {
+    QString text;
+    Core::SourceRange sourceRange;
+    int visualStart = 0;
+    int visualLength = 0;
+    Qt::AlignmentFlag alignment = Qt::AlignLeft;
+    bool isHeader = false;
+};
+
+struct TableRowVisual {
+    QVector<TableCellVisual> cells;
+    bool isHeader = false;
+    Core::SourceRange sourceRange;
+};
+
+struct TableVisualData {
+    QVector<TableRowVisual> rows;
+    int colCount = 0;
+    QVector<Qt::AlignmentFlag> alignments;
+    Core::SourceRange sourceRange;
+};
+
 struct VisualBlock {
     Parser::NodeType blockType = Parser::NodeType::Paragraph;
     int headingLevel = 0;
@@ -53,6 +75,10 @@ struct VisualBlock {
     QString embeddedSource;
     bool isInteractiveActive = false;
     qreal embeddedHeight = 0.0;
+
+    // Table component attributes
+    bool isTableBlock = false;
+    TableVisualData tableData;
 
     int sourceToVisual(int sourceOffset) const;
     int visualToSource(int visualOffset, bool preferTrailing = false) const;

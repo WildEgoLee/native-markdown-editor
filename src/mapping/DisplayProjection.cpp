@@ -539,6 +539,24 @@ bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
     return checkChanged();
 }
 
+static QString extractNodeText(const Parser::SemanticNodePtr &node, const QString &fullText) {
+    if (!node) return QString();
+    if (!node->textContent.isEmpty()) {
+        return node->textContent;
+    }
+    if (node->children.isEmpty()) {
+        if (node->fullRange.isValid() && node->fullRange.length() > 0) {
+            return fullText.mid(node->fullRange.start, node->fullRange.length());
+        }
+        return QString();
+    }
+    QString text;
+    for (const auto &ch : node->children) {
+        text.append(extractNodeText(ch, fullText));
+    }
+    return text;
+}
+
 void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
                                         const Core::TextBuffer &buffer,
                                         int cursorPos,
@@ -727,27 +745,95 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
         block.visualText = mathSeg.text;
         block.segments.append(mathSeg);
     } else if (node->type == NodeType::Table) {
-        block.marginTop = 10;
-        block.marginBottom = 10;
-        bool isActive = isSourceMode || node->fullRange.contains(cursorPos);
+        block.marginTop = 14;
+        block.marginBottom = 14;
 
-        baseFormat.setFontFamilies({QStringLiteral("Cascadia Code"), QStringLiteral("Consolas"), QStringLiteral("Segoe UI"), QStringLiteral("sans-serif")});
-        baseFormat.setFontPointSize(11.0 * (basePt / 12.0));
-
-        VisualSegment tableSeg;
-        tableSeg.sourceRange = node->fullRange;
-        tableSeg.text = fullText.mid(node->fullRange.start, node->fullRange.length());
-        tableSeg.visualStart = 0;
-        tableSeg.visualLength = tableSeg.text.length();
-        tableSeg.type = SegmentType::NormalText;
-        tableSeg.format = baseFormat;
-
-        if (!isActive) {
-            tableSeg.format.setBackground(palette.tableCellBackground);
+        if (isSourceMode) {
+            // In source mode, show raw markdown source
+            baseFormat.setFontFamilies({QStringLiteral("Cascadia Code"), QStringLiteral("Consolas"), QStringLiteral("monospace")});
+            baseFormat.setFontPointSize(11.0 * (basePt / 12.0));
+            VisualSegment tableSeg;
+            tableSeg.sourceRange = node->fullRange;
+            tableSeg.text = fullText.mid(node->fullRange.start, node->fullRange.length());
+            tableSeg.visualStart = 0;
+            tableSeg.visualLength = tableSeg.text.length();
+            tableSeg.type = SegmentType::NormalText;
+            tableSeg.format = baseFormat;
+            block.visualText = tableSeg.text;
+            block.segments.append(tableSeg);
+            outBlocks.append(std::move(block));
+            return;
         }
 
-        block.visualText = tableSeg.text;
-        block.segments.append(tableSeg);
+        // Live Preview Mode: Construct structured TableData
+        block.isTableBlock = true;
+        block.tableData.sourceRange = node->fullRange;
+        block.tableData.colCount = node->tableColumnCount;
+
+        // Convert alignments
+        for (int c = 0; c < node->tableColumnCount; ++c) {
+            Qt::AlignmentFlag align = Qt::AlignLeft;
+            if (c < node->tableAlignments.size()) {
+                uint8_t a = node->tableAlignments[c];
+                if (a == 'c') align = Qt::AlignCenter;
+                else if (a == 'r') align = Qt::AlignRight;
+            }
+            block.tableData.alignments.append(align);
+        }
+
+        // Parse Table Rows and Cells
+        int rowIndex = 0;
+        for (const auto &rowChild : node->children) {
+            if (rowChild->type != NodeType::TableRow) continue;
+
+            TableRowVisual rowVis;
+            rowVis.sourceRange = rowChild->fullRange;
+            rowVis.isHeader = (rowIndex == 0 || rowChild->isTableHeader);
+
+            int colIndex = 0;
+            for (const auto &cellChild : rowChild->children) {
+                if (cellChild->type != NodeType::TableCell) continue;
+
+                TableCellVisual cellVis;
+                cellVis.sourceRange = cellChild->fullRange;
+                cellVis.isHeader = rowVis.isHeader;
+                if (colIndex < block.tableData.alignments.size()) {
+                    cellVis.alignment = block.tableData.alignments[colIndex];
+                } else {
+                    cellVis.alignment = Qt::AlignLeft;
+                }
+
+                // Extract cell text
+                cellVis.text = extractNodeText(cellChild, fullText).trimmed();
+
+                // Build VisualSegment for this cell
+                VisualSegment cellSeg;
+                cellSeg.sourceRange = cellVis.sourceRange;
+                cellSeg.text = cellVis.text;
+                cellSeg.visualStart = block.visualText.length();
+                cellSeg.visualLength = cellVis.text.length();
+                cellSeg.type = SegmentType::NormalText;
+                cellSeg.format = baseFormat;
+
+                cellVis.visualStart = cellSeg.visualStart;
+                cellVis.visualLength = cellSeg.visualLength;
+
+                block.visualText.append(cellVis.text);
+                block.visualText.append(u'\t');
+                block.segments.append(cellSeg);
+
+                rowVis.cells.append(std::move(cellVis));
+                colIndex++;
+            }
+
+            if (block.tableData.colCount <= 0) {
+                block.tableData.colCount = qMax(block.tableData.colCount, rowVis.cells.size());
+            }
+
+            block.visualText.append(u'\n');
+            block.tableData.rows.append(std::move(rowVis));
+            rowIndex++;
+        }
     } else if (node->type == NodeType::ThematicBreak) {
         block.marginTop = 14;
         block.marginBottom = 14;

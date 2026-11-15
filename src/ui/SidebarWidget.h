@@ -36,6 +36,9 @@ public:
     QTreeWidget *recentTree() const { return m_recentTree; }
     QPushButton *recentButton() const { return m_recentBtn; }
 
+    QSize minimumSizeHint() const override { return QSize(160, 100); }
+    QSize sizeHint() const override { return QSize(260, 600); }
+
 signals:
     void fileSelected(const QString &filePath);
     void removeRecentRequested(const QString &filePath);

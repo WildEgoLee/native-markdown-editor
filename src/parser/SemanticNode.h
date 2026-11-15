@@ -51,6 +51,11 @@ struct SemanticNode {
     QString linkUrl;
     QString linkTitle;
 
+    // Table attributes
+    int tableColumnCount = 0;
+    QVector<uint8_t> tableAlignments;
+    bool isTableHeader = false;
+
     QString textContent;
 
     QVector<std::shared_ptr<SemanticNode>> children;

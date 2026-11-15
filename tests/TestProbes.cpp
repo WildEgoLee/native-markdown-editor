@@ -3311,25 +3311,23 @@ void TestProbes::testVisualRedesignScreenshotsAndThemes() {
     mainWindow.editorView()->setCursorPos(0);
     QTest::qWait(300);
 
-    // 3. Verify LayoutEngine 780px Centering and Top Margin
+    // 3. Verify LayoutEngine 780px Centering and Responsive Margins
     const auto &layoutEng = mainWindow.editorView()->layoutEngine();
     QVERIFY(layoutEng.contentWidth() <= 780.0);
-    QVERIFY(layoutEng.contentLeft() > 0.0);
-    qreal vpWidth = mainWindow.editorView()->viewport()->width();
-    if (vpWidth > (780.0 + 80.0)) {
-        QCOMPARE(layoutEng.contentWidth(), 780.0);
-        qreal expectedLeft = (vpWidth - 780.0) / 2.0;
-        QVERIFY(qAbs(layoutEng.contentLeft() - expectedLeft) < 2.0);
-    } else {
-        QCOMPARE(layoutEng.contentWidth(), qMax(200.0, vpWidth - 80.0));
-        QCOMPARE(layoutEng.contentLeft(), 40.0);
-    }
+    QVERIFY(layoutEng.contentLeft() >= 40.0);
 
-    // Verify standalone wide viewport guarantee: 1200px -> exactly 780px centered
+    // Deterministic LayoutEngine tests:
+    // Wide viewport (1200px): strictly clamped to 780px and centered at (1200 - 780) / 2 = 210px
     Editor::LayoutEngine wideEngine;
     wideEngine.layout(mainWindow.editorView()->projection(), 1200.0);
     QCOMPARE(wideEngine.contentWidth(), 780.0);
-    QCOMPARE(wideEngine.contentLeft(), (1200.0 - 780.0) / 2.0);
+    QCOMPARE(wideEngine.contentLeft(), 210.0);
+
+    // Constrained viewport (600px): responsive margins (600 - 24*2 = 552px) and left = 24px
+    Editor::LayoutEngine narrowEngine;
+    narrowEngine.layout(mainWindow.editorView()->projection(), 600.0);
+    QCOMPARE(narrowEngine.contentWidth(), 552.0);
+    QCOMPARE(narrowEngine.contentLeft(), 24.0);
 
     // Check top margin of first block: 56px canvas top padding + 28px H1 marginTop = 84px
     QVERIFY(!layoutEng.blocks().isEmpty());

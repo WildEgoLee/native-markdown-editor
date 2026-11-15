@@ -37,6 +37,8 @@
 #include "ui/FindReplaceBar.h"
 #include <QFontDialog>
 #include <QListView>
+#include <QMenu>
+#include <QAction>
 
 using namespace MarkdownTool;
 
@@ -99,6 +101,7 @@ private slots:
     void testSidebarSearchConsistency();
     void testWheelZoomAndReadingAnchor();
     void testFontDialogThemeAndLegibility();
+    void testRecentFilesHistoryPersistenceAndMenu();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempSettingsDir;
@@ -4070,6 +4073,107 @@ void TestProbes::testFontDialogThemeAndLegibility() {
 
     // Restore clean Light state
     Theme::ThemeManager::instance().setMode(Theme::ThemeMode::Light);
+}
+
+void TestProbes::testRecentFilesHistoryPersistenceAndMenu() {
+    QTemporaryDir tempDir;
+    QDir dir(tempDir.path());
+
+    QString pathA = dir.filePath(QStringLiteral("fileA_notes.md"));
+    QString pathB = dir.filePath(QStringLiteral("fileB_report.markdown"));
+    QString pathC = dir.filePath(QStringLiteral("fileC_archive.md"));
+
+    {
+        QFile fA(pathA); fA.open(QIODevice::WriteOnly); fA.write("# Doc A\n"); fA.close();
+        QFile fB(pathB); fB.open(QIODevice::WriteOnly); fB.write("# Doc B\n"); fB.close();
+        QFile fC(pathC); fC.open(QIODevice::WriteOnly); fC.write("# Doc C\n"); fC.close();
+    }
+
+    QString normA = QDir::toNativeSeparators(QFileInfo(pathA).canonicalFilePath());
+    QString normB = QDir::toNativeSeparators(QFileInfo(pathB).canonicalFilePath());
+    QString normC = QDir::toNativeSeparators(QFileInfo(pathC).canonicalFilePath());
+
+    // 1. Initial State
+    UI::MainWindow w1;
+    QVERIFY(w1.recentFiles().isEmpty());
+    QVERIFY(w1.recentFilesMenu() != nullptr);
+    QCOMPARE(w1.recentFilesMenu()->actions().size(), 1);
+    QVERIFY(!w1.recentFilesMenu()->actions().first()->isEnabled());
+    QVERIFY(w1.sidebar()->recentFiles().isEmpty());
+    QCOMPARE(w1.sidebar()->recentTree()->topLevelItemCount(), 0);
+
+    // 2. Add files and test ordering & deduplication
+    w1.addRecentFile(normA);
+    w1.addRecentFile(normB);
+    QCOMPARE(w1.recentFiles(), QStringList({normB, normA}));
+    QCOMPARE(w1.sidebar()->recentFiles(), QStringList({normB, normA}));
+    QCOMPARE(w1.sidebar()->recentTree()->topLevelItemCount(), 2);
+
+    // Re-add normA: should move to top without duplication
+    w1.addRecentFile(normA);
+    QCOMPARE(w1.recentFiles(), QStringList({normA, normB}));
+    QCOMPARE(w1.sidebar()->recentFiles(), QStringList({normA, normB}));
+    QCOMPARE(w1.sidebar()->recentTree()->topLevelItemCount(), 2);
+
+    // Add normC
+    w1.addRecentFile(normC);
+    QCOMPARE(w1.recentFiles(), QStringList({normC, normA, normB}));
+    QCOMPARE(w1.sidebar()->recentTree()->topLevelItemCount(), 3);
+
+    // 3. Verify Menu Actions and Shortcuts
+    const auto &menuActions = w1.recentFilesMenu()->actions();
+    // 3 items + 1 separator + 1 clear action = 5 actions
+    QCOMPARE(menuActions.size(), 5);
+    QVERIFY(menuActions[0]->text().contains(QStringLiteral("&1")));
+    QVERIFY(menuActions[0]->text().contains(QStringLiteral("fileC_archive.md")));
+    QVERIFY(menuActions[1]->text().contains(QStringLiteral("&2")));
+    QVERIFY(menuActions[1]->text().contains(QStringLiteral("fileA_notes.md")));
+    QVERIFY(menuActions[2]->text().contains(QStringLiteral("&3")));
+    QVERIFY(menuActions[2]->text().contains(QStringLiteral("fileB_report.markdown")));
+    QVERIFY(menuActions[3]->isSeparator());
+    QVERIFY(menuActions[4]->text().contains(QStringLiteral("清空历史记录")));
+    QVERIFY(menuActions[4]->isEnabled());
+
+    // 4. Verify Sidebar Search Filtering
+    w1.sidebar()->switchToRecent();
+    w1.sidebar()->searchEdit()->setText(QStringLiteral("archive"));
+    QCOMPARE(w1.sidebar()->recentTree()->topLevelItem(0)->isHidden(), false); // fileC_archive matches
+    QCOMPARE(w1.sidebar()->recentTree()->topLevelItem(1)->isHidden(), true);  // fileA hidden
+    QCOMPARE(w1.sidebar()->recentTree()->topLevelItem(2)->isHidden(), true);  // fileB hidden
+
+    w1.sidebar()->searchEdit()->clear();
+    QCOMPARE(w1.sidebar()->recentTree()->topLevelItem(0)->isHidden(), false);
+    QCOMPARE(w1.sidebar()->recentTree()->topLevelItem(1)->isHidden(), false);
+    QCOMPARE(w1.sidebar()->recentTree()->topLevelItem(2)->isHidden(), false);
+
+    // 5. Verify Persistence via QSettings across instances
+    QTemporaryDir tempSettingsDir;
+    QSettings testSettings(tempSettingsDir.filePath(QStringLiteral("history_test.ini")), QSettings::IniFormat);
+    w1.savePreferences(&testSettings);
+
+    UI::MainWindow w2;
+    w2.loadPreferences(&testSettings);
+    QCOMPARE(w2.recentFiles(), QStringList({normC, normA, normB}));
+    QCOMPARE(w2.sidebar()->recentFiles(), QStringList({normC, normA, normB}));
+    QCOMPARE(w2.sidebar()->recentTree()->topLevelItemCount(), 3);
+    QCOMPARE(w2.recentFilesMenu()->actions().size(), 5);
+
+    // 6. Verify Removal and Clear
+    w2.removeRecentFile(normA);
+    QCOMPARE(w2.recentFiles(), QStringList({normC, normB}));
+    QCOMPARE(w2.sidebar()->recentTree()->topLevelItemCount(), 2);
+
+    w2.clearRecentFiles();
+    QVERIFY(w2.recentFiles().isEmpty());
+    QCOMPARE(w2.sidebar()->recentTree()->topLevelItemCount(), 0);
+    QCOMPARE(w2.recentFilesMenu()->actions().size(), 1);
+
+    // 7. Verify opening a document automatically updates recent files
+    bool ok = w2.openFile(normA, false);
+    QVERIFY(ok);
+    QCOMPARE(w2.recentFiles().size(), 1);
+    QCOMPARE(w2.recentFiles().first(), normA);
+    QCOMPARE(w2.sidebar()->recentTree()->topLevelItemCount(), 1);
 }
 
 QTEST_MAIN(TestProbes)

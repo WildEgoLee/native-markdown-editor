@@ -116,6 +116,8 @@ void MainWindow::setupUi() {
     connect(m_sidebar, &SidebarWidget::fileSelected, this, [this](const QString &path) {
         openFile(path);
     });
+    connect(m_sidebar, &SidebarWidget::removeRecentRequested, this, &MainWindow::removeRecentFile);
+    connect(m_sidebar, &SidebarWidget::clearRecentRequested, this, &MainWindow::clearRecentFiles);
 
     // Status bar setup
     QStatusBar *sb = statusBar();
@@ -169,6 +171,10 @@ void MainWindow::setupMenusAndToolbars() {
     fileMenu->addAction(QStringLiteral("新建 (&N)"), QKeySequence::New, this, &MainWindow::newFile);
     fileMenu->addAction(QStringLiteral("打开文件 (&O)..."), QKeySequence::Open, this, &MainWindow::openFileDialog);
     fileMenu->addAction(QStringLiteral("打开工作区文件夹..."), this, &MainWindow::openFolderDialog);
+    m_recentMenu = fileMenu->addMenu(Theme::ThemeManager::instance().icon(QStringLiteral("history"), 16),
+                                     QStringLiteral("最近打开 (&R)"));
+    connect(m_recentMenu, &QMenu::aboutToShow, this, &MainWindow::updateRecentFilesMenu);
+    updateRecentFilesMenu();
     fileMenu->addSeparator();
     fileMenu->addAction(QStringLiteral("保存 (&S)"), QKeySequence::Save, this, &MainWindow::saveFile);
     fileMenu->addAction(QStringLiteral("另存为 (&A)..."), QKeySequence::SaveAs, this, &MainWindow::saveFileAs);
@@ -412,6 +418,10 @@ void MainWindow::updateThemeStyles() {
         bool isSource = m_editorView ? m_editorView->isSourceMode() : false;
         m_tbMode->setIcon(Theme::ThemeManager::instance().icon(isSource ? QStringLiteral("source") : QStringLiteral("mode"), 18));
     }
+    if (m_recentMenu) {
+        m_recentMenu->setIcon(Theme::ThemeManager::instance().icon(QStringLiteral("history"), 16));
+        updateRecentFilesMenu();
+    }
     updateTitle();
 }
 
@@ -433,6 +443,103 @@ void MainWindow::showFontDialog() {
             Theme::ThemeManager::instance().setBasePointSize(pt);
         }
     }
+}
+
+void MainWindow::addRecentFile(const QString &filePath) {
+    if (filePath.isEmpty()) return;
+    QFileInfo fi(filePath);
+    QString canonical = fi.canonicalFilePath();
+    if (canonical.isEmpty()) {
+        canonical = fi.absoluteFilePath();
+    }
+    canonical = QDir::toNativeSeparators(canonical);
+
+    m_recentFiles.removeAll(canonical);
+    m_recentFiles.prepend(canonical);
+    while (m_recentFiles.size() > 15) {
+        m_recentFiles.removeLast();
+    }
+
+    updateRecentFilesMenu();
+    if (m_sidebar) {
+        m_sidebar->setRecentFiles(m_recentFiles);
+    }
+
+    QSettings s;
+    s.setValue(QStringLiteral("history/recentFiles"), m_recentFiles);
+}
+
+void MainWindow::removeRecentFile(const QString &filePath) {
+    QString native = QDir::toNativeSeparators(filePath);
+    m_recentFiles.removeAll(filePath);
+    m_recentFiles.removeAll(native);
+
+    updateRecentFilesMenu();
+    if (m_sidebar) {
+        m_sidebar->setRecentFiles(m_recentFiles);
+    }
+
+    QSettings s;
+    s.setValue(QStringLiteral("history/recentFiles"), m_recentFiles);
+}
+
+void MainWindow::clearRecentFiles() {
+    m_recentFiles.clear();
+
+    updateRecentFilesMenu();
+    if (m_sidebar) {
+        m_sidebar->setRecentFiles(m_recentFiles);
+    }
+
+    QSettings s;
+    s.remove(QStringLiteral("history/recentFiles"));
+}
+
+void MainWindow::updateRecentFilesMenu() {
+    if (!m_recentMenu) return;
+    m_recentMenu->clear();
+
+    if (m_recentFiles.isEmpty()) {
+        auto *emptyAct = m_recentMenu->addAction(QStringLiteral("(无最近打开的文件)"));
+        emptyAct->setEnabled(false);
+        return;
+    }
+
+    int count = 0;
+    for (const QString &path : m_recentFiles) {
+        if (count >= 10) break;
+        QFileInfo fi(path);
+        QString text;
+        if (count < 9) {
+            text = QStringLiteral("&%1 %2").arg(count + 1).arg(fi.fileName());
+        } else if (count == 9) {
+            text = QStringLiteral("1&0 %1").arg(fi.fileName());
+        } else {
+            text = fi.fileName();
+        }
+
+        auto *act = m_recentMenu->addAction(Theme::ThemeManager::instance().icon(QStringLiteral("file"), 16), text);
+        act->setToolTip(path);
+        act->setStatusTip(path);
+        connect(act, &QAction::triggered, this, [this, path]() {
+            if (!QFile::exists(path)) {
+                auto btn = QMessageBox::warning(this,
+                    QStringLiteral("文件不存在"),
+                    QStringLiteral("找不到文件:\n%1\n\n是否从最近文件列表中移除？").arg(path),
+                    QMessageBox::Yes | QMessageBox::No);
+                if (btn == QMessageBox::Yes) {
+                    removeRecentFile(path);
+                }
+                return;
+            }
+            openFile(path);
+        });
+        count++;
+    }
+
+    m_recentMenu->addSeparator();
+    auto *clearAct = m_recentMenu->addAction(QStringLiteral("清空历史记录 (&C)"), this, &MainWindow::clearRecentFiles);
+    clearAct->setEnabled(!m_recentFiles.isEmpty());
 }
 
 void MainWindow::onRecoveryTimer() {
@@ -494,6 +601,7 @@ bool MainWindow::openFile(const QString &filePath, bool interactive) {
             if (File::FileService::loadFile(recPath, m_editorView->buffer(), err)) {
                 // Initialize session to target file and baseline hash, without overwriting recovered buffer
                 m_session.attachFile(filePath);
+                addRecentFile(filePath);
                 // Mark document as dirty so user is prompted to save, retaining snapshot until successful save
                 m_editorView->undoStack().clear(true);
                 updateTitle();
@@ -517,6 +625,7 @@ bool MainWindow::openFile(const QString &filePath, bool interactive) {
 
     m_editorView->undoStack().clear();
     m_editorView->undoStack().setSaveCheckpoint();
+    addRecentFile(filePath);
     updateTitle();
     return true;
 }
@@ -538,6 +647,7 @@ bool MainWindow::saveFile() {
                 auto forceRes = m_session.save(m_editorView->buffer(), true);
                 if (forceRes.success) {
                     m_editorView->undoStack().setSaveCheckpoint();
+                    addRecentFile(m_session.filePath());
                     updateTitle();
                     return true;
                 } else {
@@ -553,6 +663,7 @@ bool MainWindow::saveFile() {
     }
 
     m_editorView->undoStack().setSaveCheckpoint();
+    addRecentFile(m_session.filePath());
     updateTitle();
     return true;
 }
@@ -572,6 +683,7 @@ bool MainWindow::saveFileAs() {
     }
 
     m_editorView->undoStack().setSaveCheckpoint();
+    addRecentFile(m_session.filePath());
     updateTitle();
     return true;
 }
@@ -697,6 +809,12 @@ void MainWindow::loadPreferences(QSettings *settings) {
         sidebarWidth = std::clamp(sidebarWidth, 100, 800);
         m_splitter->setSizes({sidebarWidth, qMax(200, width() - sidebarWidth)});
 
+        m_recentFiles = s.value(QStringLiteral("history/recentFiles")).toStringList();
+        updateRecentFilesMenu();
+        if (m_sidebar) {
+            m_sidebar->setRecentFiles(m_recentFiles);
+        }
+
         updateTypographyMenu();
     };
 
@@ -714,6 +832,7 @@ void MainWindow::savePreferences(QSettings *settings) {
         s.setValue(QStringLiteral("window/geometry"), saveGeometry());
         s.setValue(QStringLiteral("window/sidebarVisible"), m_sidebar->isVisible());
         s.setValue(QStringLiteral("window/sidebarWidth"), m_splitter->sizes().value(0, 240));
+        s.setValue(QStringLiteral("history/recentFiles"), m_recentFiles);
     };
 
     if (settings) {

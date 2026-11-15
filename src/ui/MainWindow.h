@@ -37,6 +37,14 @@ public:
     Editor::NativeEditorView *editorView() const { return m_editorView; }
     SidebarWidget *sidebar() const { return m_sidebar; }
     FindReplaceBar *findBar() const { return m_findBar; }
+    const QStringList &recentFiles() const { return m_recentFiles; }
+    QMenu *recentFilesMenu() const { return m_recentMenu; }
+
+public slots:
+    void addRecentFile(const QString &filePath);
+    void removeRecentFile(const QString &filePath);
+    void clearRecentFiles();
+    void updateRecentFilesMenu();
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -93,6 +101,9 @@ private:
     QAction *m_actSans = nullptr;
     QAction *m_actSerif = nullptr;
     QAction *m_actMono = nullptr;
+
+    QMenu *m_recentMenu = nullptr;
+    QStringList m_recentFiles;
 };
 
 } // namespace MarkdownTool::UI

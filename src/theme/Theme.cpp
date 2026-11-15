@@ -860,6 +860,11 @@ QIcon ThemeManager::icon(const QString &name, int size, const QColor &customColo
             <polyline points="4 20 12 4 20 20"/>
             <line x1="6.8" y1="14" x2="17.2" y2="14"/>
         </svg>)").arg(size).arg(colStr);
+    } else if (name == QStringLiteral("history") || name == QStringLiteral("recent")) {
+        svg = QStringLiteral(R"(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="%1" height="%1" fill="none" stroke="%2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="9"/>
+            <polyline points="12 7 12 12 15 15"/>
+        </svg>)").arg(size).arg(colStr);
     } else {
         svg = QStringLiteral(R"(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="%1" height="%1" fill="none" stroke="%2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="10"/>

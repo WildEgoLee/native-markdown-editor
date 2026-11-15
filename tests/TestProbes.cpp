@@ -4737,6 +4737,8 @@ void TestProbes::testNinjaDependencyTrackingIntegrity() {
     // Actively verify that core header dependencies are recorded in the binary database
     QVERIFY2(depsContent.contains("LayoutEngine.h"), ".ninja_deps must actively track LayoutEngine.h");
     QVERIFY2(depsContent.contains("DisplayProjection.h"), ".ninja_deps must actively track DisplayProjection.h");
+    QVERIFY2(depsContent.contains("NativeEditorView.cpp.obj"), ".ninja_deps must track NativeEditorView.cpp.obj target");
+    QVERIFY2(depsContent.contains("LayoutEngine.cpp.obj"), ".ninja_deps must track LayoutEngine.cpp.obj target");
 }
 
 void TestProbes::testFormattedTableCellPositionMappingAndHitTest() {
@@ -4943,6 +4945,46 @@ void TestProbes::testTableCellInlineFormatChangeInvalidatesLayoutCache() {
     QVERIFY(!formats3.isEmpty());
     QVERIFY2(formats3[0].format.fontItalic(), "Table cell layout must be reflowed with italic format!");
     QVERIFY2(!formats3[0].format.fontStrikeOut(), "Table cell layout must NOT retain stale strikethrough format!");
+
+    // 4. Test real interactive incremental editing pipeline via NativeEditorView::executeEdit()
+    Editor::NativeEditorView view;
+    view.buffer().setText(QStringLiteral(
+        "| 表头一 |\n"
+        "| :--- |\n"
+        "| **增量数据** |\n"
+    ));
+    view.reparseAndRelayout();
+
+    const auto &incCell1 = view.layoutEngine().blocks()[0].tableLayout.rows[1].cells[0];
+    QCOMPARE(incCell1.text, QStringLiteral("增量数据"));
+    QVERIFY(incCell1.layout != nullptr);
+    QVERIFY(!incCell1.layout->formats().isEmpty());
+    QVERIFY(incCell1.layout->formats()[0].format.fontWeight() == QFont::Bold);
+
+    // Perform in-place keystroke/edit transaction: replace opening '**' with '~~' and closing '**' with '~~'
+    int boldOpenIdx = view.buffer().text().indexOf(QStringLiteral("**增量数据**"));
+    QVERIFY(boldOpenIdx > 0);
+    // Replace opening '**'
+    view.buffer().replace(boldOpenIdx, 2, QStringLiteral("~~"));
+    // Replace closing '**'
+    int boldCloseIdx = view.buffer().text().indexOf(QStringLiteral("**"), boldOpenIdx + 2);
+    QVERIFY(boldCloseIdx > 0);
+    view.buffer().replace(boldCloseIdx, 2, QStringLiteral("~~"));
+
+    // Incremental layout updated automatically through signal textChanged -> reparseAndRelayout()
+    const auto &incCell2 = view.layoutEngine().blocks()[0].tableLayout.rows[1].cells[0];
+    QCOMPARE(incCell2.text, QStringLiteral("增量数据"));
+    QVERIFY(incCell2.layout != nullptr);
+    QVERIFY(!incCell2.layout->formats().isEmpty());
+    QVERIFY2(incCell2.layout->formats()[0].format.fontStrikeOut(), "Incremental edit must reflow cell to strikethrough!");
+    QVERIFY2(incCell2.layout->formats()[0].format.fontWeight() != QFont::Bold, "Incremental edit must remove bold format!");
+
+    // Verify equivalence with a freshly computed cold layout
+    Editor::LayoutEngine coldEngine;
+    coldEngine.layout(view.projection(), view.viewport()->width());
+    assertVisualBlocksDeepEqual(view.projection().blocks(), view.projection().blocks());
+    QCOMPARE(view.layoutEngine().blocks().size(), coldEngine.blocks().size());
+    QCOMPARE(view.layoutEngine().blocks()[0].rect, coldEngine.blocks()[0].rect);
 }
 
 void TestProbes::testFormattedTableCellSelectionHighlightAndCursorStep() {
@@ -5013,6 +5055,62 @@ void TestProbes::testFormattedTableCellSelectionHighlightAndCursorStep() {
 
     int normBackward = projection.normalizeSourceCursor(boldSyntaxStart + 1, false);
     QCOMPARE(normBackward, boldSyntaxStart);
+
+    // 4. Pixel-level validation of selection highlight rendering in table cell via differential framebuffer comparison
+    QRectF visibleRect(0, 0, 800, 400);
+
+    // Framebuffer A: Rendered with selection covering "重要" (first two visible characters): [contentStart, contentStart + 2]
+    QPixmap pixWithSel(800, 400);
+    pixWithSel.fill(Qt::white);
+    {
+        QPainter painter(&pixWithSel);
+        QVector<Core::SelectionState> selections = {
+            Core::SelectionState(contentStart, contentStart + 2)
+        };
+        engine.paint(&painter, visibleRect, projection, selections, QString());
+    }
+
+    // Framebuffer B: Rendered without selection
+    QPixmap pixNoSel(800, 400);
+    pixNoSel.fill(Qt::white);
+    {
+        QPainter painter(&pixNoSel);
+        engine.paint(&painter, visibleRect, projection, {}, QString());
+    }
+
+    QImage imgWith = pixWithSel.toImage();
+    QImage imgNo = pixNoSel.toImage();
+
+    qreal textY = boldCell.rect.top() + (boldCell.rect.height() - boldCell.layout->boundingRect().height()) / 2.0;
+    QTextLine line = boldCell.layout->lineAt(0);
+
+    // Characters 0..2 ("重要") are selected:
+    qreal selXStart = boldCell.rect.left() + 10.0 + line.cursorToX(0);
+    qreal selXEnd = boldCell.rect.left() + 10.0 + line.cursorToX(2);
+    qreal unselXEnd = boldCell.rect.left() + 10.0 + line.cursorToX(4);
+
+    int yStart = static_cast<int>(textY + line.y());
+    int yEnd = static_cast<int>(textY + line.y() + line.height());
+
+    int diffPixelsInSel = 0;
+    for (int y = yStart; y < yEnd; ++y) {
+        for (int x = static_cast<int>(selXStart + 2); x < static_cast<int>(selXEnd - 2); ++x) {
+            if (imgWith.pixel(x, y) != imgNo.pixel(x, y)) {
+                diffPixelsInSel++;
+            }
+        }
+    }
+    QVERIFY2(diffPixelsInSel > 50, "Selected characters '重要' must produce visible selection highlight differential pixels!");
+
+    int diffPixelsUnsel = 0;
+    for (int y = yStart; y < yEnd; ++y) {
+        for (int x = static_cast<int>(selXEnd + 2); x < static_cast<int>(unselXEnd); ++x) {
+            if (imgWith.pixel(x, y) != imgNo.pixel(x, y)) {
+                diffPixelsUnsel++;
+            }
+        }
+    }
+    QCOMPARE(diffPixelsUnsel, 0); // "数据" must have zero selection highlight differential pixels!
 }
 
 QTEST_MAIN(TestProbes)

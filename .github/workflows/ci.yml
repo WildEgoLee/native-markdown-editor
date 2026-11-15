@@ -49,6 +49,39 @@ jobs:
       run: |
         ctest --test-dir build --extra-verbose --output-on-failure -C Release
 
+    - name: Verify Ninja Incremental Header Dependency Tracking
+      shell: pwsh
+      run: |
+        # 1. Verify ninja -t deps explicitly records DisplayProjection.h for NativeEditorView.cpp.obj
+        $depsOut = (ninja -C build -t deps CMakeFiles/markdown_editor_core.dir/src/editor/NativeEditorView.cpp.obj | Out-String)
+        if ($depsOut -notmatch "DisplayProjection\.h") {
+            Write-Error "ninja -t deps failed: DisplayProjection.h is NOT tracked for NativeEditorView.cpp.obj!"
+            exit 1
+        }
+        Write-Host "ninja -t deps verification passed: NativeEditorView depends on DisplayProjection.h"
+
+        # 2. Record current object modification times
+        $obj1 = Get-Item "build/CMakeFiles/markdown_editor_core.dir/src/editor/NativeEditorView.cpp.obj"
+        $obj2 = Get-Item "build/CMakeFiles/markdown_editor_core.dir/src/editor/LayoutEngine.cpp.obj"
+        $t1 = $obj1.LastWriteTimeUtc
+        $t2 = $obj2.LastWriteTimeUtc
+
+        # 3. Touch DisplayProjection.h to simulate header modification
+        Start-Sleep -Milliseconds 1100
+        (Get-Item "src/mapping/DisplayProjection.h").LastWriteTimeUtc = [DateTime]::UtcNow
+
+        # 4. Run incremental build
+        ninja -C build markdown_editor_core
+
+        # 5. Verify that both objects were recompiled due to the header change
+        $newObj1 = Get-Item "build/CMakeFiles/markdown_editor_core.dir/src/editor/NativeEditorView.cpp.obj"
+        $newObj2 = Get-Item "build/CMakeFiles/markdown_editor_core.dir/src/editor/LayoutEngine.cpp.obj"
+        if ($newObj1.LastWriteTimeUtc -le $t1 -or $newObj2.LastWriteTimeUtc -le $t2) {
+            Write-Error "Incremental rebuild failed: NativeEditorView or LayoutEngine was NOT recompiled when DisplayProjection.h changed!"
+            exit 1
+        }
+        Write-Host "Incremental header dependency tracking verified: both dependent objects recompiled cleanly."
+
     - name: Deploy Qt Runtime & Package True ZIP Artifact
       shell: pwsh
       run: |

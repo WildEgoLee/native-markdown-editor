@@ -31,7 +31,7 @@ public:
 signals:
     void fileSelected(const QString &filePath);
 
-private slots:
+public slots:
     void switchToOutline();
     void switchToFiles();
     void onSearchTextChanged(const QString &text);

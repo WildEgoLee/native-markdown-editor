@@ -164,6 +164,7 @@ private:
 
     quint64 m_incrementalParseHits = 0;
     quint64 m_fullParseFallbacks = 0;
+    int m_accumulatedZoomDelta = 0;
 };
 
 } // namespace MarkdownTool::Editor

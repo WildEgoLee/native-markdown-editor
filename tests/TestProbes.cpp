@@ -95,6 +95,7 @@ private slots:
     void testFindAndReplaceFeedback();
     void testPreferencesPersistenceAndMenuSync();
     void testSidebarSearchConsistency();
+    void testWheelZoomAndReadingAnchor();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempSettingsDir;
@@ -3530,6 +3531,9 @@ void TestProbes::testFindAndReplaceFeedback() {
     QVERIFY(editor.findText(QStringLiteral("apple"), true, true));
     QCOMPARE(editor.selectionAnchor(), 0);
     QCOMPARE(editor.cursorPos(), 5);
+    QCOMPARE(editor.cursors().size(), 1);
+    QCOMPARE(editor.cursors().first().anchor, 0);
+    QCOMPARE(editor.cursors().first().cursor, 5);
     auto s1 = editor.searchStatus(QStringLiteral("apple"), true);
     QCOMPARE(s1.total, 3);
     QCOMPARE(s1.current, 1);
@@ -3623,6 +3627,9 @@ void TestProbes::testFindAndReplaceFeedback() {
     QCOMPARE(repCount, 2);
     QCOMPARE(editor.buffer().text(), QStringLiteral("dog and dog and dog"));
     QCOMPARE(editor.searchStatus(QStringLiteral("cat"), true).total, 0);
+    QCOMPARE(editor.cursors().size(), 1);
+    QCOMPARE(editor.cursors().first().anchor, 8);
+    QCOMPARE(editor.cursors().first().cursor, 11);
 
     // Undo replace all
     Core::SelectionState undoSel;
@@ -3777,6 +3784,37 @@ void TestProbes::testPreferencesPersistenceAndMenuSync() {
         QVERIFY(!w3.sidebar()->isHidden());
     }
 
+    // 4. Off-screen geometry recovery (simulating disconnected external monitor)
+    {
+        QSettings offscreenSettings(tempPrefDir.filePath(QStringLiteral("offscreen_prefs.ini")), QSettings::IniFormat);
+        // Place window at (50000, 50000), far outside any real screen
+        QWidget dummy;
+        dummy.setGeometry(50000, 50000, 800, 600);
+        offscreenSettings.setValue(QStringLiteral("window/geometry"), dummy.saveGeometry());
+
+        UI::MainWindow wOff;
+        wOff.loadPreferences(&offscreenSettings);
+        // Window must be pulled back onto a connected screen
+        bool visibleOnScreen = false;
+        for (auto *screen : QGuiApplication::screens()) {
+            if (screen && screen->availableGeometry().intersects(wOff.frameGeometry())) {
+                visibleOnScreen = true;
+                break;
+            }
+        }
+        QVERIFY(visibleOnScreen);
+    }
+
+    // 5. Corrupted geometry binary payload
+    {
+        QSettings corruptSettings(tempPrefDir.filePath(QStringLiteral("corrupt_prefs.ini")), QSettings::IniFormat);
+        corruptSettings.setValue(QStringLiteral("window/geometry"), QByteArray("corrupted_binary_geometry_payload"));
+        UI::MainWindow wCorrupt;
+        // Must not crash and must retain valid geometry
+        wCorrupt.loadPreferences(&corruptSettings);
+        QVERIFY(wCorrupt.width() > 0 && wCorrupt.height() > 0);
+    }
+
     // Restore clean global theme
     Theme::ThemeManager::instance().setMode(Theme::ThemeMode::Light);
     Theme::ThemeManager::instance().setFontPreset(Theme::ThemeManager::FontPreset::SansSerif);
@@ -3816,51 +3854,137 @@ void TestProbes::testSidebarSearchConsistency() {
 
     UI::SidebarWidget sidebar;
     sidebar.setWorkspacePath(workDir.path());
-    QTest::qWait(100);
 
-    // Initial state: empty filter on files page
-    QCOMPARE(sidebar.fileFilterPattern(), QString());
+    // Deterministically wait for asynchronous QFileSystemModel to populate test files
+    QTRY_VERIFY_WITH_TIMEOUT(sidebar.fileModel()->index(dir.filePath(QStringLiteral("normal_doc.md"))).isValid(), 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(sidebar.fileModel()->index(dir.filePath(QStringLiteral("special[filter].txt"))).isValid(), 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(sidebar.fileModel()->index(dir.filePath(QStringLiteral("中文笔记.md"))).isValid(), 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(sidebar.fileModel()->index(dir.filePath(QStringLiteral("ignored.exe"))).isValid(), 5000);
+
+    QModelIndex normalSrc = sidebar.fileModel()->index(dir.filePath(QStringLiteral("normal_doc.md")));
+    QModelIndex specialSrc = sidebar.fileModel()->index(dir.filePath(QStringLiteral("special[filter].txt")));
+    QModelIndex chineseSrc = sidebar.fileModel()->index(dir.filePath(QStringLiteral("中文笔记.md")));
+    QModelIndex ignoredSrc = sidebar.fileModel()->index(dir.filePath(QStringLiteral("ignored.exe")));
+
+    QVERIFY(normalSrc.isValid());
+    QVERIFY(specialSrc.isValid());
+    QVERIFY(chineseSrc.isValid());
+    QVERIFY(ignoredSrc.isValid());
+
+    // 0. Verify unsupported file types are filtered out even with empty filter
+    QVERIFY(!sidebar.fileProxyModel()->mapFromSource(ignoredSrc).isValid());
+    QVERIFY(sidebar.fileProxyModel()->mapFromSource(normalSrc).isValid());
+    QVERIFY(sidebar.fileProxyModel()->mapFromSource(specialSrc).isValid());
+    QVERIFY(sidebar.fileProxyModel()->mapFromSource(chineseSrc).isValid());
 
     // 1. Literal substring match with special chars '[' and ']'
     sidebar.searchEdit()->setText(QStringLiteral("[filter]"));
-    QTest::qWait(50);
     QCOMPARE(sidebar.fileFilterPattern(), QStringLiteral("[filter]"));
+    QVERIFY(sidebar.fileProxyModel()->mapFromSource(specialSrc).isValid());
+    QVERIFY(!sidebar.fileProxyModel()->mapFromSource(normalSrc).isValid());
+    QVERIFY(!sidebar.fileProxyModel()->mapFromSource(chineseSrc).isValid());
 
-    // 2. Switch to Outline page applies current search query
-    sidebar.outlineWidget()->updateOutline(Parser::SemanticNodePtr(), QStringLiteral("# [filter] Heading\n"));
-    sidebar.findChild<QPushButton*>(QStringLiteral("segmentBtn"))->click();
-    QTest::qWait(50);
-
-    // 3. Switch back to Files page preserves filter
-    sidebar.setWorkspacePath(workDir.path());
-    QTest::qWait(50);
-    QCOMPARE(sidebar.searchEdit()->text(), QStringLiteral("[filter]"));
-    QCOMPARE(sidebar.fileFilterPattern(), QStringLiteral("[filter]"));
-
-    // 4. Chinese search
+    // 2. Chinese search
     sidebar.searchEdit()->setText(QStringLiteral("中文"));
-    QTest::qWait(50);
     QCOMPARE(sidebar.fileFilterPattern(), QStringLiteral("中文"));
+    QVERIFY(sidebar.fileProxyModel()->mapFromSource(chineseSrc).isValid());
+    QVERIFY(!sidebar.fileProxyModel()->mapFromSource(normalSrc).isValid());
+    QVERIFY(!sidebar.fileProxyModel()->mapFromSource(specialSrc).isValid());
 
-    // 5. Clear search restores default view
+    // 3. Case-insensitive search "NORMAL"
+    sidebar.searchEdit()->setText(QStringLiteral("NORMAL"));
+    QVERIFY(sidebar.fileProxyModel()->mapFromSource(normalSrc).isValid());
+    QVERIFY(!sidebar.fileProxyModel()->mapFromSource(specialSrc).isValid());
+    QVERIFY(!sidebar.fileProxyModel()->mapFromSource(chineseSrc).isValid());
+
+    // 4. Switch to Outline page applies current search query
+    sidebar.outlineWidget()->updateOutline(Parser::SemanticNodePtr(), QStringLiteral("# NORMAL Heading\n"));
+    sidebar.switchToOutline();
+    QTest::qWait(20);
+
+    // 5. Switch back to Files page preserves filter
+    sidebar.switchToFiles();
+    QTest::qWait(20);
+    QCOMPARE(sidebar.searchEdit()->text(), QStringLiteral("NORMAL"));
+    QCOMPARE(sidebar.fileFilterPattern(), QStringLiteral("NORMAL"));
+
+    // 6. Clear search restores default view
     sidebar.searchEdit()->clear();
-    QTest::qWait(50);
     QCOMPARE(sidebar.fileFilterPattern(), QString());
+    auto curNormalSrc = sidebar.fileModel()->index(dir.filePath(QStringLiteral("normal_doc.md")));
+    auto curSpecialSrc = sidebar.fileModel()->index(dir.filePath(QStringLiteral("special[filter].txt")));
+    auto curChineseSrc = sidebar.fileModel()->index(dir.filePath(QStringLiteral("中文笔记.md")));
+    QTRY_VERIFY_WITH_TIMEOUT(sidebar.fileProxyModel()->mapFromSource(curNormalSrc).isValid(), 3000);
+    QTRY_VERIFY_WITH_TIMEOUT(sidebar.fileProxyModel()->mapFromSource(curSpecialSrc).isValid(), 3000);
+    QTRY_VERIFY_WITH_TIMEOUT(sidebar.fileProxyModel()->mapFromSource(curChineseSrc).isValid(), 3000);
 
-    // 6. Clicking file in file tree emits fileSelected with exact path
+    // 7. Clicking file in file tree emits fileSelected with exact path (no conditional skip!)
     QSignalSpy fileSpy(&sidebar, &UI::SidebarWidget::fileSelected);
-    QModelIndex srcIdx = sidebar.fileModel()->index(f1.fileName());
-    if (!srcIdx.isValid()) {
-        srcIdx = sidebar.fileModel()->index(dir.filePath(QStringLiteral("normal_doc.md")));
+    QModelIndex proxyIdx = sidebar.fileProxyModel()->mapFromSource(curNormalSrc);
+    QVERIFY(proxyIdx.isValid());
+    sidebar.fileTree()->clicked(proxyIdx);
+    QTRY_VERIFY_WITH_TIMEOUT(fileSpy.count() >= 1, 2000);
+    QCOMPARE(QFileInfo(fileSpy.first().first().toString()).canonicalFilePath(),
+             QFileInfo(dir.filePath(QStringLiteral("normal_doc.md"))).canonicalFilePath());
+}
+
+void TestProbes::testWheelZoomAndReadingAnchor() {
+    Editor::NativeEditorView editor;
+    editor.resize(800, 600);
+    QString longDoc;
+    for (int i = 1; i <= 150; ++i) {
+        longDoc += QStringLiteral("### Heading %1\nThis is paragraph content for line %1 to test reading anchor.\n\n").arg(i);
     }
-    QModelIndex proxyIdx = sidebar.fileProxyModel()->mapFromSource(srcIdx);
-    if (proxyIdx.isValid()) {
-        sidebar.fileTree()->clicked(proxyIdx);
-        QTest::qWait(50);
-        QVERIFY(fileSpy.count() >= 1);
-        QCOMPARE(QFileInfo(fileSpy.first().first().toString()).canonicalFilePath(),
-                 QFileInfo(dir.filePath(QStringLiteral("normal_doc.md"))).canonicalFilePath());
+    editor.buffer().setText(longDoc);
+    editor.reparseAndRelayout();
+
+    Theme::ThemeManager::instance().setBasePointSize(12.0);
+
+    // 1. High-precision trackpad / mouse wheel notch accumulation:
+    // 3 small delta events of +30 units must NOT trigger zoom
+    QPoint pos(400, 300);
+    QPoint globalPos(400, 300);
+    for (int i = 0; i < 3; ++i) {
+        QWheelEvent ev(pos, globalPos, QPoint(), QPoint(0, 30), Qt::NoButton, Qt::ControlModifier, Qt::NoScrollPhase, false);
+        QApplication::sendEvent(editor.viewport(), &ev);
     }
+    QCOMPARE(Theme::ThemeManager::instance().basePointSize(), 12.0);
+
+    // 4th event brings total to +120 -> triggers exactly one zoomIn!
+    {
+        QWheelEvent ev(pos, globalPos, QPoint(), QPoint(0, 30), Qt::NoButton, Qt::ControlModifier, Qt::NoScrollPhase, false);
+        QApplication::sendEvent(editor.viewport(), &ev);
+    }
+    QCOMPARE(Theme::ThemeManager::instance().basePointSize(), 13.0);
+
+    // Reverse: 4 events of -30 brings back to 12.0
+    for (int i = 0; i < 4; ++i) {
+        QWheelEvent ev(pos, globalPos, QPoint(), QPoint(0, -30), Qt::NoButton, Qt::ControlModifier, Qt::NoScrollPhase, false);
+        QApplication::sendEvent(editor.viewport(), &ev);
+    }
+    QCOMPARE(Theme::ThemeManager::instance().basePointSize(), 12.0);
+
+    // 2. Reading anchor preservation on font zoom:
+    // Scroll editor to ~50% of the document
+    int maxScroll = editor.verticalScrollBar()->maximum();
+    QVERIFY(maxScroll > 1000);
+    int targetScroll = maxScroll / 2;
+    editor.verticalScrollBar()->setValue(targetScroll);
+    QCOMPARE(editor.verticalScrollBar()->value(), targetScroll);
+
+    // Trigger zoomIn
+    Theme::ThemeManager::instance().zoomIn(); // 12 -> 13
+    int newScroll = editor.verticalScrollBar()->value();
+    int newMaxScroll = editor.verticalScrollBar()->maximum();
+    QVERIFY(newMaxScroll > maxScroll);
+
+    // Relative scroll position should be preserved within 5% margin
+    double oldRatio = static_cast<double>(targetScroll) / maxScroll;
+    double newRatio = static_cast<double>(newScroll) / newMaxScroll;
+    QVERIFY(qAbs(oldRatio - newRatio) < 0.05);
+
+    // Restore clean settings
+    Theme::ThemeManager::instance().setBasePointSize(12.0);
 }
 
 QTEST_MAIN(TestProbes)

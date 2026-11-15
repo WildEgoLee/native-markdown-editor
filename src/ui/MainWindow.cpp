@@ -15,6 +15,8 @@
 #include <QActionGroup>
 #include <QSettings>
 #include <QVBoxLayout>
+#include <QScreen>
+#include <QGuiApplication>
 
 namespace MarkdownTool::UI {
 
@@ -644,6 +646,24 @@ void MainWindow::loadPreferences(QSettings *settings) {
         QByteArray geo = s.value(QStringLiteral("window/geometry")).toByteArray();
         if (!geo.isEmpty()) {
             restoreGeometry(geo);
+
+            // Screen boundary protection: Ensure window is visible on at least one connected screen
+            bool onScreen = false;
+            const auto screens = QGuiApplication::screens();
+            for (auto *screen : screens) {
+                if (screen && screen->availableGeometry().intersects(frameGeometry())) {
+                    onScreen = true;
+                    break;
+                }
+            }
+            if (!onScreen && !screens.isEmpty()) {
+                auto *primary = QGuiApplication::primaryScreen();
+                if (primary) {
+                    QRect screenGeo = primary->availableGeometry();
+                    resize(qMin(width(), screenGeo.width()), qMin(height(), screenGeo.height()));
+                    move(screenGeo.center() - rect().center());
+                }
+            }
         }
 
         bool sidebarVisible = s.value(QStringLiteral("window/sidebarVisible"), true).toBool();

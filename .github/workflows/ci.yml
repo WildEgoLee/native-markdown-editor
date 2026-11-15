@@ -89,6 +89,25 @@ jobs:
         }
         Write-Host "Smoke test passed: MarkdownNativeEditor.exe launched and resolved all dependencies cleanly."
 
+        # 4. True GUI smoke test with MainWindow, layout, and document loading (with Chinese & spaces)
+        New-Item -ItemType Directory -Force -Path "dist_extracted\测试 目录" | Out-Null
+        $testDoc = "dist_extracted\测试 目录\示例文档 带有 空格.md"
+        Set-Content -Path $testDoc -Value "# 欢迎使用原生 Markdown 编辑器`n`n这是包含 **中文** 与 *空格* 的测试文档。`n`n- 列表项 1`n- 列表项 2`n" -Encoding UTF8
+
+        $guiP = Start-Process -FilePath "dist_extracted\MarkdownNativeEditor.exe" -ArgumentList @("--gui-smoke-test", "`"$testDoc`"") -NoNewWindow -Wait -PassThru
+        if ($guiP.ExitCode -ne 0) {
+            Write-Error "GUI smoke test failed with exit code $($guiP.ExitCode)"
+            exit 1
+        }
+        Write-Host "GUI smoke test passed: MainWindow initialized, rendered document with Chinese/spaces, and exited cleanly."
+
+        # 5. Compute and print Release ZIP SHA-256 checksum
+        $zipHash = (Get-FileHash -Path MarkdownNativeEditor-windows-x64.zip -Algorithm SHA256).Hash
+        Write-Host "========================================="
+        Write-Host "Release Artifact: MarkdownNativeEditor-windows-x64.zip"
+        Write-Host "SHA-256 Checksum: $zipHash"
+        Write-Host "========================================="
+
     - name: Upload Build Artifact
       uses: actions/upload-artifact@v4
       with:

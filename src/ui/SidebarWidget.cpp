@@ -187,13 +187,12 @@ void SidebarWidget::switchToFiles() {
 }
 
 void SidebarWidget::onSearchTextChanged(const QString &text) {
-    if (m_stackWidget->currentIndex() == 0) {
+    if (m_outlineWidget) {
         m_outlineWidget->filter(text);
-    } else {
-        auto *proxy = static_cast<FileFilterProxyModel*>(m_fileProxyModel);
-        if (proxy) {
-            proxy->setFilterPattern(text);
-        }
+    }
+    auto *proxy = static_cast<FileFilterProxyModel*>(m_fileProxyModel);
+    if (proxy) {
+        proxy->setFilterPattern(text);
     }
 }
 

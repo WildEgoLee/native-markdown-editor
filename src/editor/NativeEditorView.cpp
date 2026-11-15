@@ -34,9 +34,27 @@ NativeEditorView::NativeEditorView(QWidget *parent)
     m_blinkTimer->start();
 
     auto onVisualRefresh = [this]() {
+        double oldHeight = m_layoutEngine.totalHeight();
+        int oldScroll = verticalScrollBar()->value();
+        QRectF cRect = m_layoutEngine.cursorRect(m_cursorPos, m_projection);
+        bool cursorWasVisible = (cRect.top() >= oldScroll && cRect.bottom() <= oldScroll + viewport()->height());
+        int cursorOffsetFromTop = static_cast<int>(cRect.top()) - oldScroll;
+        double ratio = (oldHeight > 0.0) ? (static_cast<double>(oldScroll) / oldHeight) : 0.0;
+
         m_projection.buildProjection(m_rootNode, m_buffer, m_cursorPos, m_isSourceMode);
         m_layoutEngine.layout(m_projection, viewport()->width());
         updateScrollBars();
+
+        if (cursorWasVisible) {
+            QRectF newCRect = m_layoutEngine.cursorRect(m_cursorPos, m_projection);
+            int newScroll = static_cast<int>(newCRect.top()) - cursorOffsetFromTop;
+            verticalScrollBar()->setValue(std::clamp(newScroll, 0, verticalScrollBar()->maximum()));
+        } else if (oldHeight > 0.0) {
+            double newHeight = m_layoutEngine.totalHeight();
+            int newScroll = static_cast<int>(ratio * newHeight);
+            verticalScrollBar()->setValue(std::clamp(newScroll, 0, verticalScrollBar()->maximum()));
+        }
+
         viewport()->update();
     };
     connect(&Theme::ThemeManager::instance(), &Theme::ThemeManager::themeChanged, this, onVisualRefresh);
@@ -720,6 +738,7 @@ bool NativeEditorView::findText(const QString &text, bool matchCase, bool forwar
 
     m_selectionAnchor = targetIdx;
     m_cursorPos = targetIdx + text.length();
+    m_cursors = {Core::SelectionState(m_selectionAnchor, m_cursorPos)};
     ensureCursorVisible();
     viewport()->update();
     auto lc = m_buffer.offsetToLineCol(m_cursorPos);
@@ -805,8 +824,11 @@ int NativeEditorView::replaceAll(const QString &findStr, const QString &replaceS
     m_undoStack.push(tx, m_buffer);
     m_cursorPos = matches.first() + replaceStr.length();
     m_selectionAnchor = matches.first();
+    m_cursors = {Core::SelectionState(m_selectionAnchor, m_cursorPos)};
     ensureCursorVisible();
     viewport()->update();
+    auto lc = m_buffer.offsetToLineCol(m_cursorPos);
+    emit cursorMoved(lc.line1(), lc.col1(), m_cursorPos);
 
     return matches.size();
 }
@@ -1596,14 +1618,27 @@ void NativeEditorView::dropEvent(QDropEvent *event) {
 
 void NativeEditorView::wheelEvent(QWheelEvent *event) {
     if (event->modifiers() & Qt::ControlModifier) {
-        if (event->angleDelta().y() > 0) {
+        int deltaY = 0;
+        if (!event->angleDelta().isNull()) {
+            deltaY = event->angleDelta().y();
+        } else if (!event->pixelDelta().isNull()) {
+            deltaY = event->pixelDelta().y();
+        }
+        m_accumulatedZoomDelta += deltaY;
+        constexpr int ZoomThreshold = 120;
+        while (m_accumulatedZoomDelta >= ZoomThreshold) {
             Theme::ThemeManager::instance().zoomIn();
-        } else if (event->angleDelta().y() < 0) {
+            m_accumulatedZoomDelta -= ZoomThreshold;
+        }
+        while (m_accumulatedZoomDelta <= -ZoomThreshold) {
             Theme::ThemeManager::instance().zoomOut();
+            m_accumulatedZoomDelta += ZoomThreshold;
         }
         event->accept();
         return;
     }
+
+    m_accumulatedZoomDelta = 0;
 
     int dy = 0;
     if (!event->pixelDelta().isNull()) {

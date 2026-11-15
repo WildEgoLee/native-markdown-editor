@@ -4,6 +4,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QDir>
 
 namespace MarkdownTool::UI {
 
@@ -64,7 +65,9 @@ SidebarWidget::SidebarWidget(QWidget *parent)
     m_fileModel = new QFileSystemModel(this);
     m_fileModel->setNameFilters({QStringLiteral("*.md"), QStringLiteral("*.markdown"), QStringLiteral("*.txt")});
     m_fileModel->setNameFilterDisables(false);
+    m_fileModel->setRootPath(QDir::currentPath());
     m_fileTree->setModel(m_fileModel);
+    m_fileTree->setRootIndex(m_fileModel->index(QDir::currentPath()));
     m_fileTree->header()->hideSection(1);
     m_fileTree->header()->hideSection(2);
     m_fileTree->header()->hideSection(3);

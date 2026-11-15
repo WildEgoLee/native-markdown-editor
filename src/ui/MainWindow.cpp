@@ -309,7 +309,7 @@ void MainWindow::updateThemeStyles() {
 }
 
 void MainWindow::onRecoveryTimer() {
-    if (!m_session.isUntitled() && m_editorView->undoStack().isDirty()) {
+    if (!m_session.isUntitled() && m_editorView && m_editorView->undoStack().isDirty()) {
         File::FileService::writeRecoverySnapshot(m_session.filePath(), m_editorView->buffer());
     }
 }

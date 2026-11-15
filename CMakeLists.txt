@@ -90,6 +90,7 @@ target_link_libraries(markdown_editor_core PUBLIC
 # Main GUI executable
 add_executable(MarkdownNativeEditor WIN32 src/main.cpp)
 target_link_libraries(MarkdownNativeEditor PRIVATE markdown_editor_core)
+set_property(SOURCE src/main.cpp PROPERTY OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/MainWindow.h)
 
 # Automated Test Suite for P0 Probes
 enable_testing()

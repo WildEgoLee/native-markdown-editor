@@ -1986,7 +1986,14 @@ void TestProbes::testColumnSelectionAndMultiLinePaste() {
     QCOMPARE(view.cursors()[2].cursor, 11);
 
     // Aligned multi-line paste: 3 lines match 3 cursors
-    QGuiApplication::clipboard()->setText(QStringLiteral("111\n222\n333"));
+    QTest::qWait(50);
+    for (int retry = 0; retry < 10; ++retry) {
+        QGuiApplication::clipboard()->setText(QStringLiteral("111\n222\n333"));
+        QTest::qWait(50);
+        if (QGuiApplication::clipboard()->text() == QStringLiteral("111\n222\n333")) {
+            break;
+        }
+    }
     view.paste();
 
     QString expected = QStringLiteral("AAA111\nBBB222\nCCC333\n");

@@ -33,3 +33,5 @@ test_results.txt
 *.tmp_*
 .tmp_*
 build_and_test.bat
+screenshots/
+crash.dmp

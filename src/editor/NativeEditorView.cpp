@@ -41,6 +41,18 @@ NativeEditorView::NativeEditorView(QWidget *parent)
         int cursorOffsetFromTop = static_cast<int>(cRect.top()) - oldScroll;
         double ratio = (oldHeight > 0.0) ? (static_cast<double>(oldScroll) / oldHeight) : 0.0;
 
+        int anchorBlockIndex = -1;
+        double anchorBlockOffsetFromTop = 0.0;
+        if (!cursorWasVisible) {
+            for (const auto &blk : m_layoutEngine.blocks()) {
+                if (blk.rect.bottom() >= oldScroll) {
+                    anchorBlockIndex = blk.visualBlockIndex;
+                    anchorBlockOffsetFromTop = blk.rect.top() - oldScroll;
+                    break;
+                }
+            }
+        }
+
         m_projection.buildProjection(m_rootNode, m_buffer, m_cursorPos, m_isSourceMode);
         m_layoutEngine.layout(m_projection, viewport()->width());
         updateScrollBars();
@@ -49,6 +61,21 @@ NativeEditorView::NativeEditorView(QWidget *parent)
             QRectF newCRect = m_layoutEngine.cursorRect(m_cursorPos, m_projection);
             int newScroll = static_cast<int>(newCRect.top()) - cursorOffsetFromTop;
             verticalScrollBar()->setValue(std::clamp(newScroll, 0, verticalScrollBar()->maximum()));
+        } else if (anchorBlockIndex >= 0) {
+            bool foundAnchor = false;
+            for (const auto &blk : m_layoutEngine.blocks()) {
+                if (blk.visualBlockIndex == anchorBlockIndex) {
+                    int newScroll = static_cast<int>(blk.rect.top() - anchorBlockOffsetFromTop);
+                    verticalScrollBar()->setValue(std::clamp(newScroll, 0, verticalScrollBar()->maximum()));
+                    foundAnchor = true;
+                    break;
+                }
+            }
+            if (!foundAnchor && oldHeight > 0.0) {
+                double newHeight = m_layoutEngine.totalHeight();
+                int newScroll = static_cast<int>(ratio * newHeight);
+                verticalScrollBar()->setValue(std::clamp(newScroll, 0, verticalScrollBar()->maximum()));
+            }
         } else if (oldHeight > 0.0) {
             double newHeight = m_layoutEngine.totalHeight();
             int newScroll = static_cast<int>(ratio * newHeight);

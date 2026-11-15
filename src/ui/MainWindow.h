@@ -27,6 +27,7 @@ public:
     ~MainWindow() override;
 
     bool openFile(const QString &filePath);
+    bool openFile(const QString &filePath, bool interactive);
     bool saveFile();
     bool saveFileAs();
 

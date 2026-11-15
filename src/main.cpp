@@ -6,6 +6,7 @@
 #include <QCommandLineOption>
 #include <QTimer>
 #include <QFileInfo>
+#include <QFile>
 #include <memory>
 
 #ifdef _WIN32
@@ -87,13 +88,14 @@ int main(int argc, char *argv[]) {
     window->loadPreferences();
     window->show();
 
+    bool openFileResult = true;
     if (!fileToOpen.isEmpty()) {
-        window->openFile(fileToOpen);
+        openFileResult = window->openFile(fileToOpen, !isGuiSmokeTest);
     }
 
     if (isGuiSmokeTest) {
         // Run full Qt event loop to ensure layout, styling, and rendering execute properly
-        QTimer::singleShot(600, &app, [&app, w = window.get(), fileToOpen]() {
+        QTimer::singleShot(600, &app, [&app, w = window.get(), fileToOpen, openFileResult]() {
             if (!w->isVisible()) {
                 std::exit(1);
             }
@@ -103,11 +105,21 @@ int main(int argc, char *argv[]) {
             if (pix.isNull()) {
                 std::exit(2);
             }
-            // If a file path was passed, verify it was loaded into the buffer
+            // Strict verification: openFile must have succeeded and editor buffer must contain the file's content
             if (!fileToOpen.isEmpty()) {
-                QFileInfo fi(fileToOpen);
-                if (fi.exists() && fi.size() > 0 && w->editorView()->buffer().isEmpty()) {
+                if (!openFileResult) {
                     std::exit(3);
+                }
+                QFile f(fileToOpen);
+                if (f.open(QIODevice::ReadOnly)) {
+                    QByteArray rawBytes = f.readAll();
+                    MarkdownTool::Core::TextBuffer expectedBuf;
+                    expectedBuf.loadFromBytes(rawBytes);
+                    if (w->editorView()->buffer().text() != expectedBuf.text()) {
+                        std::exit(4);
+                    }
+                } else {
+                    std::exit(5);
                 }
             }
             app.exit(0);

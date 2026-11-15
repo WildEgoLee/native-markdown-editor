@@ -113,7 +113,9 @@ void MainWindow::setupUi() {
         m_editorView->setFocus();
     });
 
-    connect(m_sidebar, &SidebarWidget::fileSelected, this, &MainWindow::openFile);
+    connect(m_sidebar, &SidebarWidget::fileSelected, this, [this](const QString &path) {
+        openFile(path);
+    });
 
     // Status bar setup
     QStatusBar *sb = statusBar();
@@ -141,7 +143,9 @@ void MainWindow::setupUi() {
     connect(m_editorView, &Editor::NativeEditorView::modeChanged, this, [this](bool isSource) {
         m_statusModeLabel->setText(isSource ? QStringLiteral("源码模式") : QStringLiteral("即时预览"));
     });
-    connect(m_editorView, &Editor::NativeEditorView::fileOpenRequested, this, &MainWindow::openFile);
+    connect(m_editorView, &Editor::NativeEditorView::fileOpenRequested, this, [this](const QString &path) {
+        openFile(path);
+    });
     connect(m_editorView, &Editor::NativeEditorView::folderOpenRequested, this, [this](const QString &dir) {
         m_sidebar->setWorkspacePath(dir);
         m_sidebar->setVisible(true);
@@ -456,13 +460,24 @@ void MainWindow::openFolderDialog() {
 }
 
 bool MainWindow::openFile(const QString &filePath) {
+    return openFile(filePath, true);
+}
+
+bool MainWindow::openFile(const QString &filePath, bool interactive) {
     if (!maybeSave()) {
+        return false;
+    }
+
+    if (!QFile::exists(filePath)) {
+        if (interactive) {
+            QMessageBox::critical(this, QStringLiteral("打开文件失败"), QStringLiteral("文件不存在: ") + filePath);
+        }
         return false;
     }
 
     // Check for crash recovery snapshot
     QString recPath = File::FileService::findRecoverySnapshot(filePath);
-    if (!recPath.isEmpty()) {
+    if (!recPath.isEmpty() && interactive) {
         auto btn = QMessageBox::question(this,
                                          QStringLiteral("发现未保存恢复副本"),
                                          QStringLiteral("检测到该文档有未保存的崩溃恢复快照，是否从恢复副本加载？"),
@@ -487,7 +502,9 @@ bool MainWindow::openFile(const QString &filePath) {
 
     QString err;
     if (!m_session.load(filePath, m_editorView->buffer(), err)) {
-        QMessageBox::critical(this, QStringLiteral("打开文件失败"), QStringLiteral("无法加载文件: ") + err);
+        if (interactive) {
+            QMessageBox::critical(this, QStringLiteral("打开文件失败"), QStringLiteral("无法加载文件: ") + err);
+        }
         return false;
     }
 

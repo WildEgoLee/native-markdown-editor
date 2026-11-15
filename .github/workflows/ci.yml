@@ -3,8 +3,12 @@ name: Windows Native Build & Test CI
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
+
+permissions:
+  contents: write
 
 jobs:
   build-and-test:
@@ -113,3 +117,37 @@ jobs:
       with:
         name: MarkdownNativeEditor-windows-x64
         path: MarkdownNativeEditor-windows-x64.zip
+
+    - name: Collect and Upload Visual Screenshots Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Visual-Design-Screenshots
+        path: |
+          screenshots/*.png
+          build/screenshots/*.png
+        if-no-files-found: ignore
+
+    - name: Create GitHub Release
+      if: startsWith(github.ref, 'refs/tags/v')
+      uses: softprops/action-gh-release@v2
+      with:
+        name: Native Markdown Editor ${{ github.ref_name }}
+        files: |
+          MarkdownNativeEditor-windows-x64.zip
+          screenshots/*.png
+        body: |
+          ## Native Markdown Editor ${{ github.ref_name }} (Beta Release)
+
+          基于 C++20 + Qt 6 Widgets + cmark-gfm 的高性能 Windows 原生桌面 Markdown 编辑器。
+
+          ### 核心特性与加固验收
+          - **真实 GUI 启动门禁**：`--gui-smoke-test` 严格验证主窗口构造、事件循环、文档解析与离屏完整重绘管线，支持中文与空格路径。
+          - **用户偏好持久化与多屏保护**：基于 QSettings 自动保存窗口尺寸、侧栏状态、主题与字体排版；断开外接屏幕时自动恢复至主屏幕安全视口。
+          - **高精度滚轮与精准块级阅读锚点**：支持高精度触控板平滑缩放，缩放时自适应锁定光标或当前阅读段落视口相对位置。
+          - **查找与替换交互闭环**：匹配计数实时反馈（`x / y`）、`F3` / `Shift+F3` 循环跳转、`Escape` 键快速返回、选区与光标重绘同步。
+          - **侧栏文件与大纲搜索**：字面子串过滤，安全处理 `[`、`]` 等特殊字符及中文，双向无缝同步。
+          
+          ### 运行环境
+          - Windows 10 / 11 (x64)
+          - 解压即用（已包含全部 Qt 6.8.2 运行时依赖及 SVG 渲染组件）
+        prerelease: true

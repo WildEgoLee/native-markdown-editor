@@ -6,6 +6,11 @@
 #include <QImage>
 #include <QClipboard>
 #include <QScrollBar>
+#include <QMimeData>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QDropEvent>
+#include <QUrl>
 #include <cmath>
 #include <random>
 #include <thread>
@@ -25,6 +30,7 @@
 #include "render/MathSvgRenderer.h"
 #include "render/MermaidSvgRenderer.h"
 #include "render/AsyncRenderService.h"
+#include "ui/MainWindow.h"
 
 using namespace MarkdownTool;
 
@@ -77,6 +83,7 @@ private slots:
     void testFirstRunDocumentGuiIntegration();
     void testSyncFallbackEpochRaceConditionAndUnifiedCache();
     void testRealGuiAsyncAutoRefreshAndInteractiveRegression();
+    void testFileAndImageDragAndDrop();
 };
 
 // Probe 1: UTF-8 BOM, CRLF, trailing spaces, no-newline exact byte-for-byte invariance
@@ -3061,6 +3068,173 @@ void TestProbes::testRealGuiAsyncAutoRefreshAndInteractiveRegression() {
         vBar->setValue(0);
         QCoreApplication::processEvents();
     }
+}
+
+// Probe 46: Native Drag-and-Drop for Markdown documents, images, folders, and text
+void TestProbes::testFileAndImageDragAndDrop() {
+    // 1. Editor View: Drop Markdown Document (.md and .txt)
+    Editor::NativeEditorView editorView;
+    editorView.resize(800, 600);
+    editorView.show();
+    QCoreApplication::processEvents();
+
+    QSignalSpy fileSpy(&editorView, &Editor::NativeEditorView::fileOpenRequested);
+    QSignalSpy folderSpy(&editorView, &Editor::NativeEditorView::folderOpenRequested);
+
+    // Verify DragEnter and Drop on .md document
+    QMimeData mdMime;
+    QString sampleMdPath = QStringLiteral("D:/notes/test_doc.md");
+    mdMime.setUrls({QUrl::fromLocalFile(sampleMdPath)});
+
+    QDragEnterEvent enterEv(QPoint(100, 100), Qt::CopyAction, &mdMime, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(editorView.viewport(), &enterEv);
+    QVERIFY(enterEv.isAccepted());
+
+    QDropEvent dropEv(QPointF(100, 100), Qt::CopyAction, &mdMime, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(editorView.viewport(), &dropEv);
+    QVERIFY(dropEv.isAccepted());
+    QCOMPARE(fileSpy.count(), 1);
+    QCOMPARE(fileSpy.takeFirst().at(0).toString(), sampleMdPath);
+
+    // Verify Drop on .txt document
+    QMimeData txtMime;
+    QString sampleTxtPath = QStringLiteral("D:/notes/readme.txt");
+    txtMime.setUrls({QUrl::fromLocalFile(sampleTxtPath)});
+    QDragEnterEvent txtEnter(QPoint(100, 100), Qt::CopyAction, &txtMime, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(editorView.viewport(), &txtEnter);
+    QVERIFY(txtEnter.isAccepted());
+
+    QDropEvent txtDrop(QPointF(100, 100), Qt::CopyAction, &txtMime, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(editorView.viewport(), &txtDrop);
+    QVERIFY(txtDrop.isAccepted());
+    QCOMPARE(fileSpy.count(), 1);
+    QCOMPARE(fileSpy.takeFirst().at(0).toString(), sampleTxtPath);
+
+    // 2. Editor View: Drop Image File (.png) and verify Markdown insertion, undo/redo
+    editorView.buffer().setText(QStringLiteral("# Header\n\nInitial Paragraph\n"));
+    editorView.undoStack().clear();
+    int insertPos = 10;
+    editorView.setCursorPos(insertPos);
+    QCoreApplication::processEvents();
+
+    QMimeData imgMime;
+    QString sampleImgPath = QStringLiteral("D:/images/flowchart_preview.png");
+    imgMime.setUrls({QUrl::fromLocalFile(sampleImgPath)});
+
+    QDragEnterEvent imgEnter(QPoint(50, 50), Qt::CopyAction, &imgMime, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(editorView.viewport(), &imgEnter);
+    QVERIFY(imgEnter.isAccepted());
+
+    QDropEvent imgDrop(QPointF(50, 50), Qt::CopyAction, &imgMime, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(editorView.viewport(), &imgDrop);
+    QVERIFY(imgDrop.isAccepted());
+
+    // Check inserted markdown image syntax
+    QString expectedImgMd = QStringLiteral("![flowchart_preview](D:/images/flowchart_preview.png)\n");
+    QVERIFY2(editorView.buffer().text().contains(expectedImgMd),
+             qPrintable(QString("Buffer must contain inserted image syntax: %1").arg(editorView.buffer().text())));
+
+    // Undo should revert the buffer to original state
+    editorView.undo();
+    QCoreApplication::processEvents();
+    QCOMPARE(editorView.buffer().text(), QStringLiteral("# Header\n\nInitial Paragraph\n"));
+
+    // Redo should bring back the image syntax
+    editorView.redo();
+    QCoreApplication::processEvents();
+    QVERIFY(editorView.buffer().text().contains(expectedImgMd));
+
+    // 3. Editor View: Drop Directory
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    QMimeData dirMime;
+    dirMime.setUrls({QUrl::fromLocalFile(tempDir.path())});
+
+    QDragEnterEvent dirEnter(QPoint(50, 50), Qt::CopyAction, &dirMime, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(editorView.viewport(), &dirEnter);
+    QVERIFY(dirEnter.isAccepted());
+
+    QDropEvent dirDrop(QPointF(50, 50), Qt::CopyAction, &dirMime, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(editorView.viewport(), &dirDrop);
+    QVERIFY(dirDrop.isAccepted());
+    QCOMPARE(folderSpy.count(), 1);
+    QCOMPARE(folderSpy.takeFirst().at(0).toString(), tempDir.path());
+
+    // 4. Editor View: Drop Generic File (e.g. .pdf) -> [fileName](path)
+    QMimeData pdfMime;
+    QString samplePdfPath = QStringLiteral("D:/manuals/specification.pdf");
+    pdfMime.setUrls({QUrl::fromLocalFile(samplePdfPath)});
+
+    QDragEnterEvent pdfEnter(QPoint(50, 50), Qt::CopyAction, &pdfMime, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(editorView.viewport(), &pdfEnter);
+    QVERIFY(pdfEnter.isAccepted());
+
+    QDropEvent pdfDrop(QPointF(50, 50), Qt::CopyAction, &pdfMime, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(editorView.viewport(), &pdfDrop);
+    QVERIFY(pdfDrop.isAccepted());
+    QVERIFY(editorView.buffer().text().contains(QStringLiteral("[specification.pdf](D:/manuals/specification.pdf)")));
+
+    // 5. Editor View: Drop Plain Text
+    QMimeData textMime;
+    QString sampleText = QStringLiteral("Pasted Drag-and-Drop Text");
+    textMime.setText(sampleText);
+
+    QDragEnterEvent textEnter(QPoint(50, 50), Qt::CopyAction, &textMime, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(editorView.viewport(), &textEnter);
+    QVERIFY(textEnter.isAccepted());
+
+    QDropEvent textDrop(QPointF(50, 50), Qt::CopyAction, &textMime, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(editorView.viewport(), &textDrop);
+    QVERIFY(textDrop.isAccepted());
+    QVERIFY(editorView.buffer().text().contains(sampleText));
+
+    // 6. MainWindow Integration: Drag and drop files/folders directly onto top-level window
+    QString testDocPath = tempDir.filePath("test_drop_mainWindow.md");
+    {
+        QFile f(testDocPath);
+        QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Text));
+        f.write("# Main Window Drop Test\nVerifying Top-Level Integration\n");
+        f.close();
+    }
+
+    UI::MainWindow mainWindow;
+    mainWindow.resize(900, 700);
+    mainWindow.show();
+    QCoreApplication::processEvents();
+
+    // Drop .md onto MainWindow
+    QMimeData mainDocMime;
+    mainDocMime.setUrls({QUrl::fromLocalFile(testDocPath)});
+
+    QDragEnterEvent mainEnter(QPoint(100, 100), Qt::CopyAction, &mainDocMime, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(&mainWindow, &mainEnter);
+    QVERIFY(mainEnter.isAccepted());
+
+    QDropEvent mainDrop(QPointF(100, 100), Qt::CopyAction, &mainDocMime, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(&mainWindow, &mainDrop);
+    QVERIFY(mainDrop.isAccepted());
+    QCoreApplication::processEvents();
+
+    QVERIFY(mainWindow.editorView() != nullptr);
+    QVERIFY2(mainWindow.editorView()->buffer().text().contains(QStringLiteral("Verifying Top-Level Integration")),
+             qPrintable(mainWindow.editorView()->buffer().text()));
+
+    // Drop folder onto MainWindow
+    QMimeData mainDirMime;
+    mainDirMime.setUrls({QUrl::fromLocalFile(tempDir.path())});
+
+    QDragEnterEvent mainDirEnter(QPoint(100, 100), Qt::CopyAction, &mainDirMime, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(&mainWindow, &mainDirEnter);
+    QVERIFY(mainDirEnter.isAccepted());
+
+    QDropEvent mainDirDrop(QPointF(100, 100), Qt::CopyAction, &mainDirMime, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(&mainWindow, &mainDirDrop);
+    QVERIFY(mainDirDrop.isAccepted());
+    QCoreApplication::processEvents();
+
+    QVERIFY(mainWindow.sidebar() != nullptr);
+    QVERIFY(mainWindow.sidebar()->isVisible());
 }
 
 QTEST_MAIN(TestProbes)

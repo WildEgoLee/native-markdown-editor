@@ -8,6 +8,10 @@
 #include <QLabel>
 #include <QSplitter>
 #include <QTimer>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QDropEvent>
+#include <QMimeData>
 
 namespace MarkdownTool::UI {
 
@@ -24,8 +28,14 @@ public:
     bool saveFile();
     bool saveFileAs();
 
+    Editor::NativeEditorView *editorView() const { return m_editorView; }
+    SidebarWidget *sidebar() const { return m_sidebar; }
+
 protected:
     void closeEvent(QCloseEvent *event) override;
+    void dragEnterEvent(QDragEnterEvent *event) override;
+    void dragMoveEvent(QDragMoveEvent *event) override;
+    void dropEvent(QDropEvent *event) override;
 
 private slots:
     void newFile();

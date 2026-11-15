@@ -11,6 +11,8 @@
 #include <QDesktopServices>
 #include <QUrl>
 #include <QRegularExpression>
+#include <QFileInfo>
+#include <QDir>
 #include <algorithm>
 
 namespace MarkdownTool::Editor {
@@ -21,6 +23,8 @@ NativeEditorView::NativeEditorView(QWidget *parent)
     setAttribute(Qt::WA_InputMethodEnabled, true);
     setFocusPolicy(Qt::StrongFocus);
     viewport()->setAutoFillBackground(false);
+    setAcceptDrops(true);
+    viewport()->setAcceptDrops(true);
 
     m_blinkTimer = new QTimer(this);
     m_blinkTimer->setInterval(500);
@@ -1380,6 +1384,116 @@ void NativeEditorView::paintEvent(QPaintEvent *event) {
     }
 
     painter.restore();
+}
+
+bool NativeEditorView::viewportEvent(QEvent *event) {
+    if (event->type() == QEvent::DragEnter) {
+        dragEnterEvent(static_cast<QDragEnterEvent*>(event));
+        return event->isAccepted();
+    }
+    if (event->type() == QEvent::DragMove) {
+        dragMoveEvent(static_cast<QDragMoveEvent*>(event));
+        return event->isAccepted();
+    }
+    if (event->type() == QEvent::Drop) {
+        dropEvent(static_cast<QDropEvent*>(event));
+        return event->isAccepted();
+    }
+    return QAbstractScrollArea::viewportEvent(event);
+}
+
+void NativeEditorView::dragEnterEvent(QDragEnterEvent *event) {
+    if (event->mimeData()->hasUrls() || event->mimeData()->hasText()) {
+        event->acceptProposedAction();
+    } else {
+        event->ignore();
+    }
+}
+
+void NativeEditorView::dragMoveEvent(QDragMoveEvent *event) {
+    if (event->mimeData()->hasUrls() || event->mimeData()->hasText()) {
+        QPointF docPoint = event->position() + QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value());
+        int targetOffset = m_layoutEngine.hitTest(docPoint, m_projection);
+        setCursorPos(targetOffset);
+        event->acceptProposedAction();
+    } else {
+        event->ignore();
+    }
+}
+
+void NativeEditorView::dropEvent(QDropEvent *event) {
+    if (event->mimeData()->hasUrls()) {
+        const auto urls = event->mimeData()->urls();
+        if (urls.isEmpty()) {
+            event->ignore();
+            return;
+        }
+
+        QPointF docPoint = event->position() + QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value());
+        int dropOffset = m_layoutEngine.hitTest(docPoint, m_projection);
+        dropOffset = qBound(0, dropOffset, m_buffer.length());
+        setCursorPos(dropOffset);
+
+        for (const auto &url : urls) {
+            if (url.isLocalFile()) {
+                QString localPath = url.toLocalFile();
+                QFileInfo fi(localPath);
+
+                if (fi.isDir()) {
+                    emit folderOpenRequested(localPath);
+                    event->acceptProposedAction();
+                    return;
+                }
+
+                QString ext = fi.suffix().toLower();
+                bool isImage = (ext == QStringLiteral("png") || ext == QStringLiteral("jpg") ||
+                                ext == QStringLiteral("jpeg") || ext == QStringLiteral("gif") ||
+                                ext == QStringLiteral("svg") || ext == QStringLiteral("webp") ||
+                                ext == QStringLiteral("bmp") || ext == QStringLiteral("ico"));
+
+                if (isImage) {
+                    QString normPath = localPath;
+                    normPath.replace(u'\\', u'/');
+                    QString altName = fi.completeBaseName();
+                    QString snippet = QStringLiteral("![%1](%2)\n").arg(altName, normPath);
+
+                    executeEdit(m_cursorPos, 0, snippet);
+                    setCursorPos(m_cursorPos + snippet.length());
+                    event->acceptProposedAction();
+                } else if (ext == QStringLiteral("md") || ext == QStringLiteral("markdown") ||
+                           ext == QStringLiteral("mdown") || ext == QStringLiteral("mkd") ||
+                           ext == QStringLiteral("txt")) {
+                    emit fileOpenRequested(localPath);
+                    event->acceptProposedAction();
+                    return;
+                } else {
+                    QString normPath = localPath;
+                    normPath.replace(u'\\', u'/');
+                    QString snippet = QStringLiteral("[%1](%2)").arg(fi.fileName(), normPath);
+
+                    executeEdit(m_cursorPos, 0, snippet);
+                    setCursorPos(m_cursorPos + snippet.length());
+                    event->acceptProposedAction();
+                }
+            }
+        }
+        return;
+    }
+
+    if (event->mimeData()->hasText()) {
+        QPointF docPoint = event->position() + QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value());
+        int dropOffset = m_layoutEngine.hitTest(docPoint, m_projection);
+        dropOffset = qBound(0, dropOffset, m_buffer.length());
+        setCursorPos(dropOffset);
+
+        QString text = event->mimeData()->text();
+        executeEdit(dropOffset, 0, text);
+        setCursorPos(dropOffset + text.length());
+        event->acceptProposedAction();
+        return;
+    }
+
+    event->ignore();
 }
 
 } // namespace MarkdownTool::Editor

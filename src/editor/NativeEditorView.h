@@ -9,6 +9,11 @@
 #include <QAbstractScrollArea>
 #include <QTimer>
 #include <QInputMethodEvent>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QDropEvent>
+#include <QMimeData>
+#include <QUrl>
 
 namespace MarkdownTool::UI {
 class SlashCommandPopup;
@@ -83,8 +88,14 @@ signals:
     void cursorMoved(int line, int col, int offset);
     void textChanged();
     void modeChanged(bool isSourceMode);
+    void fileOpenRequested(const QString &filePath);
+    void folderOpenRequested(const QString &dirPath);
 
 protected:
+    bool viewportEvent(QEvent *event) override;
+    void dragEnterEvent(QDragEnterEvent *event) override;
+    void dragMoveEvent(QDragMoveEvent *event) override;
+    void dropEvent(QDropEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;

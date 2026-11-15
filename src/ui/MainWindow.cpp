@@ -109,10 +109,17 @@ void MainWindow::setupUi() {
     sb->addPermanentWidget(m_statusEncodingLabel);
     sb->addPermanentWidget(m_statusModeLabel);
 
+    setAcceptDrops(true);
+
     connect(m_editorView, &Editor::NativeEditorView::cursorMoved, this, &MainWindow::updateStatusBar);
     connect(&m_editorView->undoStack(), &Core::UndoStack::cleanStateChanged, this, &MainWindow::onCleanStateChanged);
     connect(m_editorView, &Editor::NativeEditorView::modeChanged, this, [this](bool isSource) {
         m_statusModeLabel->setText(isSource ? QStringLiteral("源码模式") : QStringLiteral("即时预览"));
+    });
+    connect(m_editorView, &Editor::NativeEditorView::fileOpenRequested, this, &MainWindow::openFile);
+    connect(m_editorView, &Editor::NativeEditorView::folderOpenRequested, this, [this](const QString &dir) {
+        m_sidebar->setWorkspacePath(dir);
+        m_sidebar->setVisible(true);
     });
 
     // Populate initial outline
@@ -413,6 +420,44 @@ void MainWindow::closeEvent(QCloseEvent *event) {
     } else {
         event->ignore();
     }
+}
+
+void MainWindow::dragEnterEvent(QDragEnterEvent *event) {
+    if (event->mimeData()->hasUrls()) {
+        event->acceptProposedAction();
+    } else {
+        event->ignore();
+    }
+}
+
+void MainWindow::dragMoveEvent(QDragMoveEvent *event) {
+    if (event->mimeData()->hasUrls()) {
+        event->acceptProposedAction();
+    } else {
+        event->ignore();
+    }
+}
+
+void MainWindow::dropEvent(QDropEvent *event) {
+    if (event->mimeData()->hasUrls()) {
+        for (const auto &url : event->mimeData()->urls()) {
+            if (url.isLocalFile()) {
+                QString path = url.toLocalFile();
+                QFileInfo fi(path);
+                if (fi.isDir()) {
+                    m_sidebar->setWorkspacePath(path);
+                    m_sidebar->setVisible(true);
+                    event->acceptProposedAction();
+                    return;
+                } else {
+                    event->acceptProposedAction();
+                    openFile(path);
+                    return;
+                }
+            }
+        }
+    }
+    event->ignore();
 }
 
 } // namespace MarkdownTool::UI

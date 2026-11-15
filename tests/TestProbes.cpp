@@ -35,6 +35,8 @@
 #include "theme/Theme.h"
 #include "ui/MainWindow.h"
 #include "ui/FindReplaceBar.h"
+#include <QFontDialog>
+#include <QListView>
 
 using namespace MarkdownTool;
 
@@ -96,6 +98,7 @@ private slots:
     void testPreferencesPersistenceAndMenuSync();
     void testSidebarSearchConsistency();
     void testWheelZoomAndReadingAnchor();
+    void testFontDialogThemeAndLegibility();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempSettingsDir;
@@ -3985,6 +3988,88 @@ void TestProbes::testWheelZoomAndReadingAnchor() {
 
     // Restore clean settings
     Theme::ThemeManager::instance().setBasePointSize(12.0);
+}
+
+void TestProbes::testFontDialogThemeAndLegibility() {
+    auto calcLuma = [](const QColor &c) -> qreal {
+        return 0.299 * c.redF() + 0.587 * c.greenF() + 0.114 * c.blueF();
+    };
+
+    // --- 1. Paper Light Mode Verification ---
+    Theme::ThemeManager::instance().setMode(Theme::ThemeMode::Light);
+    const auto &lightPalette = Theme::ThemeManager::instance().palette();
+    QCOMPARE(Theme::ThemeManager::instance().currentMode(), Theme::ThemeMode::Light);
+
+    // Verify QApplication palette synchronization
+    QCOMPARE(QApplication::palette().color(QPalette::Window), lightPalette.appBackground);
+    QCOMPARE(QApplication::palette().color(QPalette::Base), lightPalette.editorBackground);
+    QCOMPARE(QApplication::palette().color(QPalette::Text), lightPalette.primaryText);
+    QCOMPARE(QApplication::palette().color(QPalette::Highlight), lightPalette.accent);
+
+    // Contrast guarantee for Light Mode
+    qreal lightBgLuma = calcLuma(lightPalette.editorBackground);
+    qreal lightTextLuma = calcLuma(lightPalette.primaryText);
+    QVERIFY(std::abs(lightBgLuma - lightTextLuma) >= 0.5);
+
+    // Instantiate QFontDialog under Light Mode
+    {
+        QFont initFont(QStringLiteral("Microsoft YaHei UI"), 12);
+        QFontDialog dlg(initFont);
+        dlg.setOption(QFontDialog::DontUseNativeDialog, true);
+        dlg.setStyleSheet(Theme::ThemeManager::instance().mainStylesheet());
+
+        // Verify child widgets exist and are correctly structured
+        auto listViews = dlg.findChildren<QListView *>();
+        QVERIFY(!listViews.isEmpty());
+        auto lineEdits = dlg.findChildren<QLineEdit *>();
+        QVERIFY(!lineEdits.isEmpty());
+
+        // Verify that stylesheet contains QDialog, QListView, QLineEdit, QPushButton rules
+        QString qss = dlg.styleSheet();
+        QVERIFY(qss.contains(QStringLiteral("QDialog")));
+        QVERIFY(qss.contains(QStringLiteral("QListView")));
+        QVERIFY(qss.contains(QStringLiteral("QLineEdit")));
+        QVERIFY(qss.contains(QStringLiteral("QPushButton")));
+        QVERIFY(qss.contains(lightPalette.editorBackground.name()));
+        QVERIFY(qss.contains(lightPalette.primaryText.name()));
+    }
+
+    // --- 2. Graphite Dark Mode Verification ---
+    Theme::ThemeManager::instance().setMode(Theme::ThemeMode::Dark);
+    const auto &darkPalette = Theme::ThemeManager::instance().palette();
+    QCOMPARE(Theme::ThemeManager::instance().currentMode(), Theme::ThemeMode::Dark);
+
+    // Verify QApplication palette synchronization in Dark Mode
+    QCOMPARE(QApplication::palette().color(QPalette::Window), darkPalette.appBackground);
+    QCOMPARE(QApplication::palette().color(QPalette::Base), darkPalette.editorBackground);
+    QCOMPARE(QApplication::palette().color(QPalette::Text), darkPalette.primaryText);
+    QCOMPARE(QApplication::palette().color(QPalette::Highlight), darkPalette.accent);
+    QCOMPARE(QApplication::palette().color(QPalette::HighlightedText), darkPalette.accentText);
+
+    // Contrast guarantee for Dark Mode
+    qreal darkBgLuma = calcLuma(darkPalette.editorBackground);
+    qreal darkTextLuma = calcLuma(darkPalette.primaryText);
+    QVERIFY(std::abs(darkBgLuma - darkTextLuma) >= 0.5);
+
+    // Instantiate QFontDialog under Dark Mode
+    {
+        QFont initFont(QStringLiteral("Cascadia Code"), 12);
+        QFontDialog dlg(initFont);
+        dlg.setOption(QFontDialog::DontUseNativeDialog, true);
+        dlg.setStyleSheet(Theme::ThemeManager::instance().mainStylesheet());
+
+        auto listViews = dlg.findChildren<QListView *>();
+        QVERIFY(!listViews.isEmpty());
+        auto lineEdits = dlg.findChildren<QLineEdit *>();
+        QVERIFY(!lineEdits.isEmpty());
+
+        QString qss = dlg.styleSheet();
+        QVERIFY(qss.contains(darkPalette.editorBackground.name()));
+        QVERIFY(qss.contains(darkPalette.primaryText.name()));
+    }
+
+    // Restore clean Light state
+    Theme::ThemeManager::instance().setMode(Theme::ThemeMode::Light);
 }
 
 QTEST_MAIN(TestProbes)

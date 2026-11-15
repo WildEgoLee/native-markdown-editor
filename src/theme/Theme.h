@@ -25,6 +25,7 @@ struct ColorPalette {
     QColor secondaryText;
     QColor border;
     QColor accent;
+    QColor accentText;
     QColor hover;
     QColor selected;
 
@@ -56,6 +57,7 @@ public:
     ThemeMode currentMode() const { return m_mode; }
     void setMode(ThemeMode mode);
     void toggleMode();
+    void applyApplicationPalette();
 
     void loadSettings(QSettings *settings = nullptr);
     void saveSettings(QSettings *settings = nullptr);

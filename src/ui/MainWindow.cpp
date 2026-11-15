@@ -416,14 +416,21 @@ void MainWindow::updateThemeStyles() {
 }
 
 void MainWindow::showFontDialog() {
-    bool ok = false;
     QFont currentFont(Theme::ThemeManager::instance().proseFontFamilies().first(),
                       static_cast<int>(Theme::ThemeManager::instance().basePointSize()));
-    QFont selectedFont = QFontDialog::getFont(&ok, currentFont, this, QStringLiteral("选择正文字体与字号"));
-    if (ok) {
+    QFontDialog dlg(currentFont, this);
+    dlg.setWindowTitle(QStringLiteral("选择正文字体与字号"));
+    dlg.setOption(QFontDialog::DontUseNativeDialog, true);
+    dlg.setStyleSheet(Theme::ThemeManager::instance().mainStylesheet());
+    if (dlg.exec() == QDialog::Accepted) {
+        QFont selectedFont = dlg.selectedFont();
         Theme::ThemeManager::instance().setCustomFontFamily(selectedFont.family());
-        if (selectedFont.pointSize() > 0) {
-            Theme::ThemeManager::instance().setBasePointSize(selectedFont.pointSize());
+        int pt = selectedFont.pointSize();
+        if (pt <= 0 && selectedFont.pixelSize() > 0) {
+            pt = static_cast<int>(selectedFont.pixelSize() * 72.0 / dlg.logicalDpiY());
+        }
+        if (pt > 0) {
+            Theme::ThemeManager::instance().setBasePointSize(pt);
         }
     }
 }

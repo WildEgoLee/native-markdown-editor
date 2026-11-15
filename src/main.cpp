@@ -1,4 +1,5 @@
 #include "ui/MainWindow.h"
+#include "theme/Theme.h"
 
 #include <QApplication>
 #include <QFont>
@@ -83,6 +84,7 @@ int main(int argc, char *argv[]) {
     defaultFont.setFamilies({QStringLiteral("Microsoft YaHei UI"), QStringLiteral("PingFang SC"), QStringLiteral("Segoe UI"), QStringLiteral("sans-serif")});
     defaultFont.setPointSize(10);
     app.setFont(defaultFont);
+    MarkdownTool::Theme::ThemeManager::instance().applyApplicationPalette();
 
     auto window = std::make_unique<MarkdownTool::UI::MainWindow>();
     window->loadPreferences();

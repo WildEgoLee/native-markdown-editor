@@ -2,6 +2,7 @@
 #include <QtSvg/QSvgRenderer>
 #include <QPainter>
 #include <QApplication>
+#include <QPalette>
 #include <QSettings>
 
 namespace MarkdownTool::Theme {
@@ -89,6 +90,7 @@ void ThemeManager::updatePalette() {
         m_palette.secondaryText       = QColor(0x73, 0x7B, 0x88);
         m_palette.border              = QColor(0xE4, 0xE8, 0xEF);
         m_palette.accent              = QColor(0x56, 0x68, 0xDB);
+        m_palette.accentText          = QColor(0xFF, 0xFF, 0xFF);
         m_palette.hover               = QColor(0xE8, 0xEB, 0xF3);
         m_palette.selected            = QColor(0xDF, 0xE4, 0xF2);
 
@@ -117,6 +119,7 @@ void ThemeManager::updatePalette() {
         m_palette.secondaryText       = QColor(0xA0, 0xA7, 0xB4);
         m_palette.border              = QColor(0x34, 0x39, 0x43);
         m_palette.accent              = QColor(0x92, 0xA0, 0xFF);
+        m_palette.accentText          = QColor(0x18, 0x1A, 0x20);
         m_palette.hover               = QColor(0x2C, 0x31, 0x3C);
         m_palette.selected            = QColor(0x35, 0x3C, 0x4A);
 
@@ -136,6 +139,35 @@ void ThemeManager::updatePalette() {
         m_palette.syntaxMarkerColor   = QColor(0x65, 0x6E, 0x7E);
         m_palette.taskCheckedColor    = QColor(0x92, 0xA0, 0xFF);
         m_palette.taskUncheckedColor  = QColor(0x65, 0x6E, 0x7E);
+    }
+
+    applyApplicationPalette();
+}
+
+void ThemeManager::applyApplicationPalette() {
+    if (qApp) {
+        QPalette pal = qApp->palette();
+        pal.setColor(QPalette::Window, m_palette.appBackground);
+        pal.setColor(QPalette::WindowText, m_palette.primaryText);
+        pal.setColor(QPalette::Base, m_palette.editorBackground);
+        pal.setColor(QPalette::AlternateBase, m_palette.sidebarBackground);
+        pal.setColor(QPalette::ToolTipBase, m_palette.cardBackground);
+        pal.setColor(QPalette::ToolTipText, m_palette.primaryText);
+        pal.setColor(QPalette::Text, m_palette.primaryText);
+        pal.setColor(QPalette::Button, m_palette.appBackground);
+        pal.setColor(QPalette::ButtonText, m_palette.primaryText);
+        pal.setColor(QPalette::BrightText, Qt::white);
+        pal.setColor(QPalette::Highlight, m_palette.accent);
+        pal.setColor(QPalette::HighlightedText, m_palette.accentText);
+        pal.setColor(QPalette::Link, m_palette.accent);
+        pal.setColor(QPalette::LinkVisited, m_palette.accent);
+        pal.setColor(QPalette::PlaceholderText, m_palette.secondaryText);
+
+        pal.setColor(QPalette::Disabled, QPalette::WindowText, m_palette.secondaryText);
+        pal.setColor(QPalette::Disabled, QPalette::Text, m_palette.secondaryText);
+        pal.setColor(QPalette::Disabled, QPalette::ButtonText, m_palette.secondaryText);
+
+        qApp->setPalette(pal);
     }
 }
 
@@ -412,6 +444,158 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
     background: none;
     width: 0;
 }
+
+/* Dialogs & Input Controls (QFontDialog, QMessageBox, etc.) */
+QDialog {
+    background-color: %2;
+    color: %1;
+}
+
+QGroupBox {
+    color: %1;
+    font-weight: 600;
+    font-size: 13px;
+    border: 1px solid %3;
+    border-radius: 8px;
+    margin-top: 14px;
+    padding-top: 14px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 10px;
+    padding: 0 4px;
+    color: %7;
+    background-color: %2;
+}
+
+QListView {
+    background-color: %8;
+    color: %1;
+    border: 1px solid %3;
+    border-radius: 6px;
+    padding: 2px;
+    outline: none;
+}
+
+QListView::item {
+    padding: 4px 8px;
+    border-radius: 4px;
+    color: %1;
+}
+
+QListView::item:hover {
+    background-color: %4;
+    color: %1;
+}
+
+QListView::item:selected {
+    background-color: %5;
+    color: %1;
+}
+
+QListView::item:selected:active {
+    background-color: %6;
+    color: %9;
+}
+
+QLineEdit {
+    background-color: %8;
+    color: %1;
+    border: 1px solid %3;
+    border-radius: 6px;
+    padding: 5px 8px;
+    selection-background-color: %6;
+    selection-color: %9;
+}
+
+QLineEdit:focus {
+    border: 1px solid %6;
+}
+
+QLineEdit:read-only {
+    background-color: %8;
+    color: %1;
+}
+
+QComboBox {
+    background-color: %8;
+    color: %1;
+    border: 1px solid %3;
+    border-radius: 6px;
+    padding: 5px 8px;
+}
+
+QComboBox:hover {
+    border: 1px solid %6;
+}
+
+QComboBox::drop-down {
+    border: none;
+    width: 20px;
+}
+
+QComboBox QAbstractItemView {
+    background-color: %8;
+    color: %1;
+    border: 1px solid %3;
+    selection-background-color: %5;
+    selection-color: %1;
+}
+
+QPushButton {
+    background-color: %4;
+    color: %1;
+    border: 1px solid %3;
+    border-radius: 6px;
+    padding: 6px 16px;
+    font-size: 13px;
+    font-weight: 500;
+    min-width: 68px;
+}
+
+QPushButton:hover {
+    background-color: %5;
+    border-color: %6;
+}
+
+QPushButton:pressed {
+    background-color: %6;
+    color: %9;
+}
+
+QPushButton:default {
+    background-color: %6;
+    color: %9;
+    border: 1px solid %6;
+}
+
+QCheckBox {
+    color: %1;
+    spacing: 6px;
+}
+
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid %3;
+    border-radius: 4px;
+    background-color: %8;
+}
+
+QCheckBox::indicator:hover {
+    border-color: %6;
+}
+
+QCheckBox::indicator:checked {
+    background-color: %6;
+    border-color: %6;
+}
+
+QLabel {
+    color: %1;
+}
 )")
         .arg(p.primaryText.name())
         .arg(p.appBackground.name())
@@ -419,7 +603,9 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
         .arg(p.hover.name())
         .arg(p.selected.name())
         .arg(p.accent.name())
-        .arg(p.secondaryText.name());
+        .arg(p.secondaryText.name())
+        .arg(p.editorBackground.name())
+        .arg(p.accentText.name());
 }
 
 QString ThemeManager::sidebarStylesheet() const {

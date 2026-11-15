@@ -66,6 +66,71 @@ int VisualBlock::visualToSource(int visualOffset, bool preferTrailing) const {
     return sourceRange.end;
 }
 
+int TableCellVisual::sourceToVisual(int sourceOffset) const {
+    if (segments.isEmpty()) {
+        if (sourceOffset <= sourceRange.start) {
+            return 0;
+        }
+        if (sourceOffset >= sourceRange.end) {
+            return text.length();
+        }
+        return qBound(0, sourceOffset - sourceRange.start, text.length());
+    }
+
+    if (sourceOffset <= sourceRange.start) {
+        return 0;
+    }
+    if (sourceOffset >= sourceRange.end) {
+        return text.length();
+    }
+
+    for (const auto &seg : segments) {
+        if (seg.type == SegmentType::HiddenMarker) {
+            if (seg.sourceRange.contains(sourceOffset)) {
+                return seg.visualStart;
+            }
+        } else {
+            if (seg.sourceRange.contains(sourceOffset)) {
+                int delta = sourceOffset - seg.sourceRange.start;
+                return qBound(seg.visualStart, seg.visualStart + delta, seg.visualStart + seg.visualLength);
+            }
+        }
+    }
+
+    return text.length();
+}
+
+int TableCellVisual::visualToSource(int visualOffset, bool preferTrailing) const {
+    if (segments.isEmpty()) {
+        if (visualOffset <= 0) {
+            return sourceRange.start;
+        }
+        if (visualOffset >= text.length()) {
+            return sourceRange.end;
+        }
+        return qBound(sourceRange.start, sourceRange.start + visualOffset, sourceRange.end);
+    }
+
+    int clampedVisual = qBound(0, visualOffset, text.length());
+
+    for (const auto &seg : segments) {
+        if (seg.type == SegmentType::HiddenMarker) {
+            continue;
+        }
+
+        int segVisualEnd = seg.visualStart + seg.visualLength;
+        if (clampedVisual >= seg.visualStart && clampedVisual <= segVisualEnd) {
+            if (clampedVisual == segVisualEnd && !preferTrailing && segVisualEnd < text.length()) {
+                continue;
+            }
+            int delta = clampedVisual - seg.visualStart;
+            return qBound(seg.sourceRange.start, seg.sourceRange.start + delta, seg.sourceRange.end);
+        }
+    }
+
+    return sourceRange.end;
+}
+
 int DisplayProjection::normalizeSourceCursor(int sourceOffset, bool forward) const {
     int blockIdx = findBlockIndexBySourceOffset(sourceOffset);
     if (blockIdx < 0 || blockIdx >= m_blocks.size()) {
@@ -153,7 +218,8 @@ static void applyInlineStyles(const Parser::SemanticNodePtr &inlineNode,
                              const Core::TextBuffer &buffer,
                              int cursorPos,
                              bool isSourceMode,
-                             VisualBlock &block,
+                             QString &outVisualText,
+                             QVector<VisualSegment> &outSegments,
                              QTextCharFormat baseFormat)
 {
     if (!inlineNode) {
@@ -168,13 +234,13 @@ static void applyInlineStyles(const Parser::SemanticNodePtr &inlineNode,
         VisualSegment seg;
         seg.sourceRange = inlineNode->fullRange;
         seg.text = fullText.mid(seg.sourceRange.start, seg.sourceRange.length());
-        seg.visualStart = block.visualText.length();
+        seg.visualStart = outVisualText.length();
         seg.visualLength = seg.text.length();
         seg.type = SegmentType::NormalText;
         seg.format = baseFormat;
 
-        block.visualText.append(seg.text);
-        block.segments.append(seg);
+        outVisualText.append(seg.text);
+        outSegments.append(seg);
         break;
     }
 
@@ -205,36 +271,36 @@ static void applyInlineStyles(const Parser::SemanticNodePtr &inlineNode,
             prefixSeg.sourceRange = inlineNode->prefixRange;
             if (isActive) {
                 prefixSeg.text = fullText.mid(prefixSeg.sourceRange.start, prefixSeg.sourceRange.length());
-                prefixSeg.visualStart = block.visualText.length();
+                prefixSeg.visualStart = outVisualText.length();
                 prefixSeg.visualLength = prefixSeg.text.length();
                 prefixSeg.type = SegmentType::SyntaxMarker;
                 prefixSeg.format = baseFormat;
                 prefixSeg.format.setForeground(palette.syntaxMarkerColor);
-                block.visualText.append(prefixSeg.text);
+                outVisualText.append(prefixSeg.text);
             } else {
-                prefixSeg.visualStart = block.visualText.length();
+                prefixSeg.visualStart = outVisualText.length();
                 prefixSeg.visualLength = 0;
                 prefixSeg.type = SegmentType::HiddenMarker;
             }
-            block.segments.append(prefixSeg);
+            outSegments.append(prefixSeg);
         }
 
         // Inner content
         if (!inlineNode->children.isEmpty()) {
             for (const auto &child : inlineNode->children) {
-                applyInlineStyles(child, buffer, cursorPos, isSourceMode, block, styledFormat);
+                applyInlineStyles(child, buffer, cursorPos, isSourceMode, outVisualText, outSegments, styledFormat);
             }
         } else if (inlineNode->contentRange.isValid()) {
             VisualSegment contentSeg;
             contentSeg.sourceRange = inlineNode->contentRange;
             contentSeg.text = fullText.mid(contentSeg.sourceRange.start, contentSeg.sourceRange.length());
-            contentSeg.visualStart = block.visualText.length();
+            contentSeg.visualStart = outVisualText.length();
             contentSeg.visualLength = contentSeg.text.length();
             contentSeg.type = SegmentType::NormalText;
             contentSeg.format = styledFormat;
 
-            block.visualText.append(contentSeg.text);
-            block.segments.append(contentSeg);
+            outVisualText.append(contentSeg.text);
+            outSegments.append(contentSeg);
         }
 
         // Suffix marker
@@ -243,18 +309,18 @@ static void applyInlineStyles(const Parser::SemanticNodePtr &inlineNode,
             suffixSeg.sourceRange = inlineNode->suffixRange;
             if (isActive) {
                 suffixSeg.text = fullText.mid(suffixSeg.sourceRange.start, suffixSeg.sourceRange.length());
-                suffixSeg.visualStart = block.visualText.length();
+                suffixSeg.visualStart = outVisualText.length();
                 suffixSeg.visualLength = suffixSeg.text.length();
                 suffixSeg.type = SegmentType::SyntaxMarker;
                 suffixSeg.format = baseFormat;
                 suffixSeg.format.setForeground(palette.syntaxMarkerColor);
-                block.visualText.append(suffixSeg.text);
+                outVisualText.append(suffixSeg.text);
             } else {
-                suffixSeg.visualStart = block.visualText.length();
+                suffixSeg.visualStart = outVisualText.length();
                 suffixSeg.visualLength = 0;
                 suffixSeg.type = SegmentType::HiddenMarker;
             }
-            block.segments.append(suffixSeg);
+            outSegments.append(suffixSeg);
         }
         break;
     }
@@ -264,7 +330,7 @@ static void applyInlineStyles(const Parser::SemanticNodePtr &inlineNode,
         linkFormat.setForeground(Theme::currentPalette().accent);
         linkFormat.setFontUnderline(true);
         for (const auto &child : inlineNode->children) {
-            applyInlineStyles(child, buffer, cursorPos, isSourceMode, block, linkFormat);
+            applyInlineStyles(child, buffer, cursorPos, isSourceMode, outVisualText, outSegments, linkFormat);
         }
         break;
     }
@@ -274,19 +340,19 @@ static void applyInlineStyles(const Parser::SemanticNodePtr &inlineNode,
         VisualSegment seg;
         seg.sourceRange = inlineNode->fullRange;
         seg.text = (inlineNode->type == NodeType::LineBreak) ? QStringLiteral("\n") : QStringLiteral(" ");
-        seg.visualStart = block.visualText.length();
+        seg.visualStart = outVisualText.length();
         seg.visualLength = seg.text.length();
         seg.type = SegmentType::NormalText;
         seg.format = baseFormat;
 
-        block.visualText.append(seg.text);
-        block.segments.append(seg);
+        outVisualText.append(seg.text);
+        outSegments.append(seg);
         break;
     }
 
     default:
         for (const auto &child : inlineNode->children) {
-            applyInlineStyles(child, buffer, cursorPos, isSourceMode, block, baseFormat);
+            applyInlineStyles(child, buffer, cursorPos, isSourceMode, outVisualText, outSegments, baseFormat);
         }
         break;
     }
@@ -410,6 +476,12 @@ bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
                                                     cell.sourceRange.start += delta;
                                                     cell.sourceRange.end += delta;
                                                 }
+                                                for (auto &cSeg : cell.segments) {
+                                                    if (cSeg.sourceRange.isValid()) {
+                                                        cSeg.sourceRange.start += delta;
+                                                        cSeg.sourceRange.end += delta;
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -467,6 +539,38 @@ bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
                     s1.format != s2.format)
                 {
                     return true;
+                }
+            }
+            if (b1.isTableBlock) {
+                if (b1.tableData.colCount != b2.tableData.colCount ||
+                    b1.tableData.rows.size() != b2.tableData.rows.size() ||
+                    b1.tableData.alignments != b2.tableData.alignments ||
+                    b1.tableData.sourceRange != b2.tableData.sourceRange)
+                {
+                    return true;
+                }
+                for (int r = 0; r < b1.tableData.rows.size(); ++r) {
+                    const auto &r1 = b1.tableData.rows[r];
+                    const auto &r2 = b2.tableData.rows[r];
+                    if (r1.cells.size() != r2.cells.size() ||
+                        r1.sourceRange != r2.sourceRange ||
+                        r1.isHeader != r2.isHeader)
+                    {
+                        return true;
+                    }
+                    for (int c = 0; c < r1.cells.size(); ++c) {
+                        const auto &c1 = r1.cells[c];
+                        const auto &c2 = r2.cells[c];
+                        if (c1.text != c2.text ||
+                            c1.sourceRange != c2.sourceRange ||
+                            c1.visualStart != c2.visualStart ||
+                            c1.visualLength != c2.visualLength ||
+                            c1.alignment != c2.alignment ||
+                            c1.segments.size() != c2.segments.size())
+                        {
+                            return true;
+                        }
+                    }
                 }
             }
         }
@@ -645,7 +749,7 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
         }
 
         for (const auto &child : node->children) {
-            applyInlineStyles(child, buffer, cursorPos, isSourceMode, block, baseFormat);
+            applyInlineStyles(child, buffer, cursorPos, isSourceMode, block.visualText, block.segments, baseFormat);
         }
     } else if (node->type == NodeType::ListItem) {
         block.isTaskItem = node->isTaskItem;
@@ -674,10 +778,10 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
         for (const auto &child : node->children) {
             if (child->isBlock()) {
                 for (const auto &inlineChild : child->children) {
-                    applyInlineStyles(inlineChild, buffer, cursorPos, isSourceMode, block, baseFormat);
+                    applyInlineStyles(inlineChild, buffer, cursorPos, isSourceMode, block.visualText, block.segments, baseFormat);
                 }
             } else {
-                applyInlineStyles(child, buffer, cursorPos, isSourceMode, block, baseFormat);
+                applyInlineStyles(child, buffer, cursorPos, isSourceMode, block.visualText, block.segments, baseFormat);
             }
         }
     } else if (node->type == NodeType::BlockQuote) {
@@ -710,10 +814,10 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
         for (const auto &child : node->children) {
             if (child->isBlock()) {
                 for (const auto &inlineChild : child->children) {
-                    applyInlineStyles(inlineChild, buffer, cursorPos, isSourceMode, block, baseFormat);
+                    applyInlineStyles(inlineChild, buffer, cursorPos, isSourceMode, block.visualText, block.segments, baseFormat);
                 }
             } else {
-                applyInlineStyles(child, buffer, cursorPos, isSourceMode, block, baseFormat);
+                applyInlineStyles(child, buffer, cursorPos, isSourceMode, block.visualText, block.segments, baseFormat);
             }
         }
     } else if (node->type == NodeType::CodeBlock) {
@@ -831,20 +935,41 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
                     cellVis.alignment = Qt::AlignLeft;
                 }
 
-                // Extract cell text
-                cellVis.text = extractNodeText(cellChild, fullText).trimmed();
+                QTextCharFormat cellBaseFormat = baseFormat;
+                if (rowVis.isHeader) {
+                    cellBaseFormat.setFontWeight(QFont::Bold);
+                }
 
-                // Build VisualSegment for this cell
+                if (!cellChild->children.isEmpty()) {
+                    for (const auto &inlineChild : cellChild->children) {
+                        applyInlineStyles(inlineChild, buffer, cursorPos, isSourceMode, cellVis.text, cellVis.segments, cellBaseFormat);
+                    }
+                }
+                if (cellVis.text.isEmpty() && cellVis.segments.isEmpty()) {
+                    cellVis.text = extractNodeText(cellChild, fullText).trimmed();
+                    if (!cellVis.text.isEmpty()) {
+                        VisualSegment cellSeg;
+                        cellSeg.sourceRange = cellVis.sourceRange;
+                        cellSeg.text = cellVis.text;
+                        cellSeg.visualStart = 0;
+                        cellSeg.visualLength = cellSeg.text.length();
+                        cellSeg.type = SegmentType::NormalText;
+                        cellSeg.format = cellBaseFormat;
+                        cellVis.segments.append(cellSeg);
+                    }
+                }
+
+                cellVis.visualStart = block.visualText.length();
+                cellVis.visualLength = cellVis.text.length();
+
+                // Block-level representation of cell for raw/fallback
                 VisualSegment cellSeg;
                 cellSeg.sourceRange = cellVis.sourceRange;
                 cellSeg.text = cellVis.text;
                 cellSeg.visualStart = block.visualText.length();
                 cellSeg.visualLength = cellVis.text.length();
                 cellSeg.type = SegmentType::NormalText;
-                cellSeg.format = baseFormat;
-
-                cellVis.visualStart = cellSeg.visualStart;
-                cellVis.visualLength = cellSeg.visualLength;
+                cellSeg.format = cellBaseFormat;
 
                 block.visualText.append(cellVis.text);
                 block.visualText.append(u'\t');
@@ -880,7 +1005,7 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
         block.marginTop = 5;
         block.marginBottom = 5;
         for (const auto &child : node->children) {
-            applyInlineStyles(child, buffer, cursorPos, isSourceMode, block, baseFormat);
+            applyInlineStyles(child, buffer, cursorPos, isSourceMode, block.visualText, block.segments, baseFormat);
         }
     }
 

@@ -21,6 +21,10 @@ struct TableCellLayout {
     int visualLength = 0;
     Qt::AlignmentFlag alignment = Qt::AlignLeft;
     bool isHeader = false;
+    QVector<Mapping::VisualSegment> segments;
+
+    int sourceToVisual(int sourceOffset) const;
+    int visualToSource(int visualOffset, bool preferTrailing = false) const;
 };
 
 struct TableRowLayout {
@@ -76,6 +80,7 @@ public:
                 const QString &preeditString = QString());
 
     qreal totalHeight() const { return m_totalHeight; }
+    qreal totalWidth() const { return m_totalWidth; }
     qreal contentLeft() const { return m_contentLeft; }
     qreal contentWidth() const { return m_contentWidth; }
 
@@ -116,6 +121,7 @@ private:
 
     QVector<BlockLayoutData> m_blocks;
     qreal m_totalHeight = 0;
+    qreal m_totalWidth = 0;
     qreal m_lastViewportWidth = 0;
     qreal m_lastContentWidth = 0;
     qreal m_lastBasePointSize = 0;

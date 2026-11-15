@@ -10,16 +10,19 @@ if(MSVC)
     if(CMAKE_GENERATOR MATCHES "Ninja")
         file(WRITE "${CMAKE_BINARY_DIR}/CMakeFiles/showinc_detect.h" "")
         file(WRITE "${CMAKE_BINARY_DIR}/CMakeFiles/showinc_detect.c" "#include \"showinc_detect.h\"\n")
-        execute_process(
-            COMMAND "${CMAKE_C_COMPILER}" /nologo /showIncludes /c "${CMAKE_BINARY_DIR}/CMakeFiles/showinc_detect.c"
-            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/CMakeFiles"
-            OUTPUT_VARIABLE _showinc_out
-            ERROR_VARIABLE _showinc_out
-            ENCODING UTF-8
-        )
-        if(_showinc_out MATCHES "([^\r\n]+)[ ]+.*showinc_detect\\.h")
-            set(CMAKE_CL_SHOWINCLUDES_PREFIX "${CMAKE_MATCH_1} " CACHE INTERNAL "ShowIncludes prefix" FORCE)
-        endif()
+        foreach(_enc UTF-8 AUTO ANSI OEM)
+            execute_process(
+                COMMAND "${CMAKE_C_COMPILER}" /nologo /showIncludes /c "${CMAKE_BINARY_DIR}/CMakeFiles/showinc_detect.c"
+                WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/CMakeFiles"
+                OUTPUT_VARIABLE _showinc_out
+                ERROR_VARIABLE _showinc_out
+                ENCODING ${_enc}
+            )
+            if(_showinc_out MATCHES "([^\r\n]+)[ ]+.*showinc_detect\\.h")
+                set(CMAKE_CL_SHOWINCLUDES_PREFIX "${CMAKE_MATCH_1} " CACHE INTERNAL "ShowIncludes prefix" FORCE)
+                break()
+            endif()
+        endforeach()
     endif()
 endif()
 

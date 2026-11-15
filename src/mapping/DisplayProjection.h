@@ -36,6 +36,10 @@ struct TableCellVisual {
     int visualLength = 0;
     Qt::AlignmentFlag alignment = Qt::AlignLeft;
     bool isHeader = false;
+    QVector<VisualSegment> segments;
+
+    int sourceToVisual(int sourceOffset) const;
+    int visualToSource(int visualOffset, bool preferTrailing = false) const;
 };
 
 struct TableRowVisual {

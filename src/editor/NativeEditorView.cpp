@@ -377,11 +377,16 @@ void NativeEditorView::reparseAndRelayout(int editOffset, int lengthRemoved, int
 }
 
 void NativeEditorView::updateScrollBars() {
-    int maxScrollY = qMax(0, static_cast<int>(m_layoutEngine.totalHeight()) - viewport()->height());
+    int maxScrollY = qMax(0, static_cast<int>(std::ceil(m_layoutEngine.totalHeight())) - viewport()->height());
     verticalScrollBar()->setRange(0, maxScrollY);
     verticalScrollBar()->setPageStep(viewport()->height());
     int scrollLines = qMax(1, QApplication::wheelScrollLines());
     verticalScrollBar()->setSingleStep(static_cast<int>(scrollLines * 26.0));
+
+    int maxScrollX = qMax(0, static_cast<int>(std::ceil(m_layoutEngine.totalWidth())) - viewport()->width());
+    horizontalScrollBar()->setRange(0, maxScrollX);
+    horizontalScrollBar()->setPageStep(viewport()->width());
+    horizontalScrollBar()->setSingleStep(26);
 }
 
 void NativeEditorView::ensureCursorVisible() {
@@ -396,6 +401,19 @@ void NativeEditorView::ensureCursorVisible() {
         verticalScrollBar()->setValue(qMax(0, curY - 20));
     } else if (curY + curH > scrollVal + viewH) {
         verticalScrollBar()->setValue(curY + curH - viewH + 20);
+    }
+
+    int viewW = viewport()->width();
+    if (horizontalScrollBar()->maximum() > 0 && viewW > 0) {
+        int curX = static_cast<int>(cRect.left());
+        int curW = static_cast<int>(cRect.width());
+        int scrollValX = horizontalScrollBar()->value();
+
+        if (curX < scrollValX + 20) {
+            horizontalScrollBar()->setValue(qMax(0, curX - 30));
+        } else if (curX + curW > scrollValX + viewW - 20) {
+            horizontalScrollBar()->setValue(curX + curW - viewW + 30);
+        }
     }
 }
 

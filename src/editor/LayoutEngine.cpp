@@ -9,6 +9,55 @@
 
 namespace MarkdownTool::Editor {
 
+int TableCellLayout::sourceToVisual(int sourceOffset) const {
+    if (segments.isEmpty()) {
+        if (sourceOffset <= sourceRange.start) return 0;
+        if (sourceOffset >= sourceRange.end) return text.length();
+        return qBound(0, sourceOffset - sourceRange.start, text.length());
+    }
+    if (sourceOffset <= sourceRange.start) return 0;
+    if (sourceOffset >= sourceRange.end) return text.length();
+
+    for (const auto &seg : segments) {
+        if (seg.type == Mapping::SegmentType::HiddenMarker) {
+            if (seg.sourceRange.contains(sourceOffset)) {
+                return seg.visualStart;
+            }
+        } else {
+            if (seg.sourceRange.contains(sourceOffset)) {
+                int delta = sourceOffset - seg.sourceRange.start;
+                return qBound(seg.visualStart, seg.visualStart + delta, seg.visualStart + seg.visualLength);
+            }
+        }
+    }
+    return text.length();
+}
+
+int TableCellLayout::visualToSource(int visualOffset, bool preferTrailing) const {
+    if (segments.isEmpty()) {
+        if (visualOffset <= 0) return sourceRange.start;
+        if (visualOffset >= text.length()) return sourceRange.end;
+        return qBound(sourceRange.start, sourceRange.start + visualOffset, sourceRange.end);
+    }
+
+    int clampedVisual = qBound(0, visualOffset, text.length());
+
+    for (const auto &seg : segments) {
+        if (seg.type == Mapping::SegmentType::HiddenMarker) {
+            continue;
+        }
+        int segVisualEnd = seg.visualStart + seg.visualLength;
+        if (clampedVisual >= seg.visualStart && clampedVisual <= segVisualEnd) {
+            if (clampedVisual == segVisualEnd && !preferTrailing && segVisualEnd < text.length()) {
+                continue;
+            }
+            int delta = clampedVisual - seg.visualStart;
+            return qBound(seg.sourceRange.start, seg.sourceRange.start + delta, seg.sourceRange.end);
+        }
+    }
+    return sourceRange.end;
+}
+
 LayoutEngine::LayoutEngine() = default;
 LayoutEngine::~LayoutEngine() = default;
 
@@ -122,6 +171,7 @@ void LayoutEngine::layoutSingleBlock(const Mapping::VisualBlock &vBlock,
                     cellLayout.alignment = vRow.cells[c].alignment;
                     cellLayout.visualStart = vRow.cells[c].visualStart;
                     cellLayout.visualLength = vRow.cells[c].visualLength;
+                    cellLayout.segments = vRow.cells[c].segments;
                 }
 
                 qreal cellX = m_contentLeft;
@@ -135,6 +185,21 @@ void LayoutEngine::layoutSingleBlock(const Mapping::VisualBlock &vBlock,
                 cellLayout.text = text;
                 cellLayout.layout->setText(text);
                 cellLayout.layout->setFont(vRow.isHeader ? headerFont : normalFont);
+
+                QList<QTextLayout::FormatRange> cellFormats;
+                int textLen = text.length();
+                for (const auto &seg : cellLayout.segments) {
+                    if (seg.visualLength > 0 && seg.visualStart >= 0 && seg.visualStart < textLen) {
+                        QTextLayout::FormatRange fr;
+                        fr.start = seg.visualStart;
+                        fr.length = qMin(seg.visualLength, textLen - seg.visualStart);
+                        fr.format = seg.format;
+                        cellFormats.append(fr);
+                    }
+                }
+                if (!cellFormats.isEmpty()) {
+                    cellLayout.layout->setFormats(cellFormats);
+                }
 
                 QTextOption opt;
                 opt.setAlignment(cellLayout.alignment);
@@ -444,6 +509,7 @@ void LayoutEngine::layout(const Mapping::DisplayProjection &projection,
     if (vBlocks.isEmpty()) {
         m_blocks.clear();
         m_totalHeight = 0;
+        m_totalWidth = 0;
         m_lastViewportWidth = contentWidth;
         m_lastContentWidth = 0;
         return;
@@ -490,49 +556,53 @@ void LayoutEngine::layout(const Mapping::DisplayProjection &projection,
         for (int i = 0; i < N; ++i) {
             layoutSingleBlock(vBlocks[i], i, currentY, preeditOffset, preeditString);
         }
-        m_totalHeight = currentY + Theme::ThemeManager::bottomBreathingPadding();
-        return;
-    }
-
-    // 1. Prefix matching from beginning
-    int prefixLen = 0;
-    while (prefixLen < N && prefixLen < M) {
-        bool hasIme = !preeditString.isEmpty() && preeditOffset >= 0 && vBlocks[prefixLen].sourceRange.contains(preeditOffset);
-        if (!isBlockLayoutEqual(vBlocks[prefixLen], oldBlocks[prefixLen], hasIme)) {
-            break;
+    } else {
+        // 1. Prefix matching from beginning
+        int prefixLen = 0;
+        while (prefixLen < N && prefixLen < M) {
+            bool hasIme = !preeditString.isEmpty() && preeditOffset >= 0 && vBlocks[prefixLen].sourceRange.contains(preeditOffset);
+            if (!isBlockLayoutEqual(vBlocks[prefixLen], oldBlocks[prefixLen], hasIme)) {
+                break;
+            }
+            ++prefixLen;
         }
-        ++prefixLen;
-    }
 
-    // 2. Suffix matching from end
-    int suffixLen = 0;
-    while (suffixLen < (N - prefixLen) && suffixLen < (M - prefixLen)) {
-        int vIdx = N - 1 - suffixLen;
-        int oldIdx = M - 1 - suffixLen;
-        bool hasIme = !preeditString.isEmpty() && preeditOffset >= 0 && vBlocks[vIdx].sourceRange.contains(preeditOffset);
-        if (!isBlockLayoutEqual(vBlocks[vIdx], oldBlocks[oldIdx], hasIme)) {
-            break;
+        // 2. Suffix matching from end
+        int suffixLen = 0;
+        while (suffixLen < (N - prefixLen) && suffixLen < (M - prefixLen)) {
+            int vIdx = N - 1 - suffixLen;
+            int oldIdx = M - 1 - suffixLen;
+            bool hasIme = !preeditString.isEmpty() && preeditOffset >= 0 && vBlocks[vIdx].sourceRange.contains(preeditOffset);
+            if (!isBlockLayoutEqual(vBlocks[vIdx], oldBlocks[oldIdx], hasIme)) {
+                break;
+            }
+            ++suffixLen;
         }
-        ++suffixLen;
-    }
 
-    // 3. Assemble: Prefix (reused layout)
-    for (int i = 0; i < prefixLen; ++i) {
-        reuseBlock(oldBlocks[i], vBlocks[i], i, currentY);
-    }
+        // 3. Assemble: Prefix (reused layout)
+        for (int i = 0; i < prefixLen; ++i) {
+            reuseBlock(oldBlocks[i], vBlocks[i], i, currentY);
+        }
 
-    // 4. Assemble: Modified / New blocks
-    for (int i = prefixLen; i < N - suffixLen; ++i) {
-        layoutSingleBlock(vBlocks[i], i, currentY, preeditOffset, preeditString);
-    }
+        // 4. Assemble: Modified / New blocks
+        for (int i = prefixLen; i < N - suffixLen; ++i) {
+            layoutSingleBlock(vBlocks[i], i, currentY, preeditOffset, preeditString);
+        }
 
-    // 5. Assemble: Suffix (reused layout)
-    for (int i = N - suffixLen; i < N; ++i) {
-        int oldIdx = M - (N - i);
-        reuseBlock(oldBlocks[oldIdx], vBlocks[i], i, currentY);
+        // 5. Assemble: Suffix (reused layout)
+        for (int i = N - suffixLen; i < N; ++i) {
+            int oldIdx = M - (N - i);
+            reuseBlock(oldBlocks[oldIdx], vBlocks[i], i, currentY);
+        }
     }
 
     m_totalHeight = currentY + Theme::ThemeManager::bottomBreathingPadding();
+
+    qreal maxBlockRight = contentWidth;
+    for (const auto &b : m_blocks) {
+        maxBlockRight = std::max(maxBlockRight, b.rect.right() + sidePad);
+    }
+    m_totalWidth = maxBlockRight;
 }
 
 int LayoutEngine::hitTest(const QPointF &point, const Mapping::DisplayProjection &projection) const {
@@ -582,9 +652,9 @@ int LayoutEngine::hitTest(const QPointF &point, const Mapping::DisplayProjection
                             if (!line.isValid()) {
                                 line = cell.layout->lineAt(0);
                             }
-                            int cursorOffset = line.xToCursor(relX);
-                            cursorOffset = qBound(0, cursorOffset, cell.sourceRange.length());
-                            return cell.sourceRange.start + cursorOffset;
+                            int visualCursor = line.xToCursor(relX);
+                            visualCursor = qBound(0, visualCursor, cell.text.length());
+                            return cell.visualToSource(visualCursor);
                         }
                         return cell.sourceRange.start;
                     }
@@ -645,13 +715,13 @@ QRectF LayoutEngine::cursorRect(int sourceOffset, const Mapping::DisplayProjecti
                     if (cell.layout && cell.layout->lineCount() > 0) {
                         qreal cellContentH = cell.layout->boundingRect().height();
                         qreal textY = cell.rect.top() + (cell.rect.height() - cellContentH) / 2.0;
-                        int relOffset = sourceOffset - cell.sourceRange.start;
-                        relOffset = qBound(0, relOffset, cell.layout->text().length());
-                        QTextLine line = cell.layout->lineForTextPosition(relOffset);
+                        int visualOffset = cell.sourceToVisual(sourceOffset);
+                        visualOffset = qBound(0, visualOffset, cell.layout->text().length());
+                        QTextLine line = cell.layout->lineForTextPosition(visualOffset);
                         if (!line.isValid()) {
                             line = cell.layout->lineAt(0);
                         }
-                        qreal cursorX = cell.rect.left() + 10.0 + line.cursorToX(relOffset);
+                        qreal cursorX = cell.rect.left() + 10.0 + line.cursorToX(visualOffset);
                         qreal cursorY = textY + line.y();
                         return QRectF(cursorX, cursorY, 2, line.height());
                     }

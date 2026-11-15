@@ -109,6 +109,8 @@ private slots:
     void testTableLayoutCacheInvalidationOnStructureChange();
     void testWideTableGeometryAndNonClipping();
     void testNinjaDependencyTrackingIntegrity();
+    void testFormattedTableCellPositionMappingAndHitTest();
+    void testWideTableHorizontalScrollingAndNavigation();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempSettingsDir;
@@ -1508,6 +1510,49 @@ static void assertVisualBlocksDeepEqual(const QVector<Mapping::VisualBlock> &a, 
         if (b1.isTaskItem || b2.isTaskItem) {
             QCOMPARE(b1.checkboxSourceRange.start, b2.checkboxSourceRange.start);
             QCOMPARE(b1.checkboxSourceRange.end, b2.checkboxSourceRange.end);
+        }
+        QCOMPARE(b1.isTableBlock, b2.isTableBlock);
+        if (b1.isTableBlock) {
+            const auto &t1 = b1.tableData;
+            const auto &t2 = b2.tableData;
+            QCOMPARE(t1.colCount, t2.colCount);
+            QCOMPARE(t1.sourceRange.start, t2.sourceRange.start);
+            QCOMPARE(t1.sourceRange.end, t2.sourceRange.end);
+            QCOMPARE(t1.alignments.size(), t2.alignments.size());
+            for (int a = 0; a < t1.alignments.size(); ++a) {
+                QCOMPARE(t1.alignments[a], t2.alignments[a]);
+            }
+            QCOMPARE(t1.rows.size(), t2.rows.size());
+            for (int r = 0; r < t1.rows.size(); ++r) {
+                const auto &r1 = t1.rows[r];
+                const auto &r2 = t2.rows[r];
+                QCOMPARE(r1.isHeader, r2.isHeader);
+                QCOMPARE(r1.sourceRange.start, r2.sourceRange.start);
+                QCOMPARE(r1.sourceRange.end, r2.sourceRange.end);
+                QCOMPARE(r1.cells.size(), r2.cells.size());
+                for (int c = 0; c < r1.cells.size(); ++c) {
+                    const auto &c1 = r1.cells[c];
+                    const auto &c2 = r2.cells[c];
+                    QCOMPARE(c1.text, c2.text);
+                    QCOMPARE(c1.sourceRange.start, c2.sourceRange.start);
+                    QCOMPARE(c1.sourceRange.end, c2.sourceRange.end);
+                    QCOMPARE(c1.visualStart, c2.visualStart);
+                    QCOMPARE(c1.visualLength, c2.visualLength);
+                    QCOMPARE(c1.alignment, c2.alignment);
+                    QCOMPARE(c1.isHeader, c2.isHeader);
+                    QCOMPARE(c1.segments.size(), c2.segments.size());
+                    for (int s = 0; s < c1.segments.size(); ++s) {
+                        const auto &s1 = c1.segments[s];
+                        const auto &s2 = c2.segments[s];
+                        QCOMPARE(s1.visualStart, s2.visualStart);
+                        QCOMPARE(s1.visualLength, s2.visualLength);
+                        QCOMPARE(s1.sourceRange.start, s2.sourceRange.start);
+                        QCOMPARE(s1.sourceRange.end, s2.sourceRange.end);
+                        QCOMPARE(s1.type, s2.type);
+                        QCOMPARE(s1.format, s2.format);
+                    }
+                }
+            }
         }
         QCOMPARE(b1.segments.size(), b2.segments.size());
         for (int s = 0; s < b1.segments.size(); ++s) {
@@ -2983,16 +3028,14 @@ void TestProbes::testRealGuiAsyncAutoRefreshAndInteractiveRegression() {
 
     editorView.buffer().setText(doc);
     editorView.show();
-    QCoreApplication::processEvents();
 
-    // Initial paint occurs (displaying placeholders)
-    int initialPaints = counter.count;
-    QVERIFY(initialPaints >= 1);
-
-    // Grab initial placeholder framebuffer
+    // Grab initial placeholder framebuffer immediately before background thread results are dispatched
     QPixmap initialPix(editorView.viewport()->size());
     editorView.viewport()->render(&initialPix);
     QImage initialImg = initialPix.toImage();
+
+    int initialPaints = counter.count;
+    QVERIFY(initialPaints >= 1);
 
     // Wait for at least 2 renderReady signals from background threads
     int waitCycles = 0;
@@ -4662,18 +4705,158 @@ void TestProbes::testWideTableGeometryAndNonClipping() {
 }
 
 void TestProbes::testNinjaDependencyTrackingIntegrity() {
-    // Read rules.ninja to verify msvc_deps_prefix is cleanly decoded without mojibake
+    // 1. Verify rules.ninja exists and msvc_deps_prefix is cleanly decoded without mojibake
     QFile rulesFile(QStringLiteral("CMakeFiles/rules.ninja"));
     if (!rulesFile.exists()) {
         rulesFile.setFileName(QStringLiteral("build/CMakeFiles/rules.ninja"));
     }
-    if (rulesFile.open(QIODevice::ReadOnly)) {
-        QByteArray content = rulesFile.readAll();
-        // Mojibake character '娉' (UTF-8 0xE5 0xA8 0x89) must NOT exist
-        QVERIFY(!content.contains("\xE5\xA8\x89"));
-        QVERIFY(!content.contains("娉ㄦ剰"));
-        rulesFile.close();
+    QVERIFY2(rulesFile.exists(), "rules.ninja must exist in build directory");
+    QVERIFY(rulesFile.open(QIODevice::ReadOnly));
+    QByteArray content = rulesFile.readAll();
+    rulesFile.close();
+
+    // Must declare msvc_deps_prefix
+    QVERIFY2(content.contains("msvc_deps_prefix = "), "rules.ninja must contain msvc_deps_prefix definition");
+
+    // Mojibake character '娉' (UTF-8 0xE5 0xA8 0x89) must NOT exist
+    QVERIFY(!content.contains("\xE5\xA8\x89"));
+    QVERIFY(!content.contains("娉ㄦ剰"));
+
+    // 2. Verify Ninja dependency database (.ninja_deps) exists and actively records build dependencies
+    QFile depsFile(QStringLiteral(".ninja_deps"));
+    if (!depsFile.exists()) {
+        depsFile.setFileName(QStringLiteral("build/.ninja_deps"));
     }
+    QVERIFY2(depsFile.exists(), ".ninja_deps must exist in build directory");
+    QVERIFY2(depsFile.size() > 0, ".ninja_deps must be non-empty and actively recording dependencies");
+}
+
+void TestProbes::testFormattedTableCellPositionMappingAndHitTest() {
+    Parser::MarkdownParserAdapter parser;
+    Core::TextBuffer buffer;
+    buffer.setText(QStringLiteral(
+        "| 普通文本 | **加粗内容** | `核心代码` |\n"
+        "| :--- | :---: | ---: |\n"
+        "| 常规项 | 数据一 | 结果一 |\n"
+    ));
+
+    auto root = parser.parse(buffer);
+    QVERIFY(root != nullptr);
+    QCOMPARE(root->children.size(), 1);
+
+    // 1. DisplayProjection in Live Preview Mode (cursor outside table)
+    Mapping::DisplayProjection projection;
+    projection.buildProjection(root, buffer, 0, false);
+    QCOMPARE(projection.blocks().size(), 1);
+
+    const auto &tableBlock = projection.blocks()[0];
+    QVERIFY(tableBlock.isTableBlock);
+    QCOMPARE(tableBlock.tableData.rows.size(), 2);
+
+    // Cell [0, 1] is "**加粗内容**"
+    const auto &boldCell = tableBlock.tableData.rows[0].cells[1];
+    QCOMPARE(boldCell.text, QStringLiteral("加粗内容"));
+    QVERIFY(boldCell.segments.size() >= 3); // HiddenMarker, NormalText(bold), HiddenMarker
+
+    // Verify cell segments
+    QCOMPARE(boldCell.segments[0].type, Mapping::SegmentType::HiddenMarker);
+    QCOMPARE(boldCell.segments[1].type, Mapping::SegmentType::NormalText);
+    QCOMPARE(boldCell.segments[1].text, QStringLiteral("加粗内容"));
+    QCOMPARE(boldCell.segments[1].visualStart, 0);
+    QCOMPARE(boldCell.segments[1].visualLength, 4);
+    QCOMPARE(boldCell.segments[2].type, Mapping::SegmentType::HiddenMarker);
+
+    // Verify sourceToVisual mapping
+    int contentStart = buffer.text().indexOf(QStringLiteral("加粗内容"));
+    QVERIFY(contentStart > 0);
+    int boldSyntaxStart = contentStart - 2; // '**' start
+
+    // Inside opening '**' maps to visual start 0
+    QCOMPARE(boldCell.sourceToVisual(boldSyntaxStart), 0);
+    QCOMPARE(boldCell.sourceToVisual(boldSyntaxStart + 1), 0);
+
+    // Inside '加粗内容' maps character by character
+    QCOMPARE(boldCell.sourceToVisual(contentStart), 0);     // '加'
+    QCOMPARE(boldCell.sourceToVisual(contentStart + 1), 1); // '粗'
+    QCOMPARE(boldCell.sourceToVisual(contentStart + 2), 2); // '内'
+    QCOMPARE(boldCell.sourceToVisual(contentStart + 3), 3); // '容'
+    QCOMPARE(boldCell.sourceToVisual(contentStart + 4), 4); // after '容'
+
+    // Verify visualToSource mapping
+    QCOMPARE(boldCell.visualToSource(0), contentStart);
+    QCOMPARE(boldCell.visualToSource(1), contentStart + 1);
+    QCOMPARE(boldCell.visualToSource(2), contentStart + 2);
+    QCOMPARE(boldCell.visualToSource(3), contentStart + 3);
+    QCOMPARE(boldCell.visualToSource(4), contentStart + 4);
+
+    // 2. LayoutEngine layout and hitTest / cursorRect verification
+    Editor::LayoutEngine engine;
+    engine.layout(projection, 800.0);
+    const auto &lBlocks = engine.blocks();
+    QCOMPARE(lBlocks.size(), 1);
+
+    const auto &lCell = lBlocks[0].tableLayout.rows[0].cells[1];
+    QVERIFY(lCell.layout != nullptr);
+
+    // cursorRect for '粗' (contentStart + 1) must be strictly inside cell rect and horizontally advance past '加'
+    QRectF cRect0 = engine.cursorRect(contentStart, projection);
+    QRectF cRect1 = engine.cursorRect(contentStart + 1, projection);
+    QVERIFY(cRect0.isValid());
+    QVERIFY(cRect1.isValid());
+    QVERIFY(lCell.rect.contains(cRect0.topLeft()));
+    QVERIFY(lCell.rect.contains(cRect1.topLeft()));
+    QVERIFY(cRect1.left() > cRect0.left());
+
+    // hitTest at cRect1.center() must resolve back to contentStart + 1 (not the '**' marker!)
+    int hitSource = engine.hitTest(cRect1.center(), projection);
+    QCOMPARE(hitSource, contentStart + 1);
+}
+
+void TestProbes::testWideTableHorizontalScrollingAndNavigation() {
+    Parser::MarkdownParserAdapter parser;
+    Core::TextBuffer buffer;
+    buffer.setText(QStringLiteral(
+        "| 列一 | 列二 | 列三 | 列四 | 列五 | 列六 | 列七 | 列八 | 列九 | 列十 |\n"
+        "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
+        "| 宽单元格一 | 宽单元格二 | 宽单元格三 | 宽单元格四 | 宽单元格五 | 宽单元格六 | 宽单元格七 | 宽单元格八 | 宽单元格九 | 宽单元格十 |\n"
+    ));
+
+    auto root = parser.parse(buffer);
+    QVERIFY(root != nullptr);
+
+    Mapping::DisplayProjection projection;
+    projection.buildProjection(root, buffer, 0, false);
+    QCOMPARE(projection.blocks().size(), 1);
+
+    // 1. Layout in narrow viewport (400px width)
+    Editor::LayoutEngine engine;
+    const qreal narrowViewportW = 400.0;
+    engine.layout(projection, narrowViewportW);
+
+    // Total content width must expand beyond narrow viewport (10 columns * 60px+ min width >= 600px)
+    QVERIFY(engine.totalWidth() > 600.0);
+    QVERIFY(engine.totalWidth() > narrowViewportW);
+
+    // 2. Editor View Scrollbar integration
+    Editor::NativeEditorView view;
+    view.buffer().setText(buffer.text());
+    view.setFixedSize(static_cast<int>(narrowViewportW), 500);
+    view.viewport()->resize(static_cast<int>(narrowViewportW), 500);
+    view.reparseAndRelayout();
+
+    // Update scrollbars
+    QScrollBar *hBar = view.horizontalScrollBar();
+    QVERIFY(hBar != nullptr);
+    QVERIFY(hBar->maximum() > 200);
+
+    // 3. Navigation to last column must automatically scroll horizontal scrollbar
+    int lastColOffset = buffer.text().indexOf(QStringLiteral("宽单元格十"));
+    QVERIFY(lastColOffset > 0);
+
+    view.setCursorPos(lastColOffset);
+
+    // Horizontal scrollbar must have scrolled right to bring column 10 into view
+    QVERIFY2(hBar->value() > 0, "Horizontal scrollbar must scroll right to ensure wide column 10 is visible");
 }
 
 QTEST_MAIN(TestProbes)

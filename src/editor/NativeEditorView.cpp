@@ -683,8 +683,10 @@ void NativeEditorView::paste() {
             QString assetsDir;
             if (!m_documentPath.isEmpty()) {
                 assetsDir = QFileInfo(m_documentPath).dir().filePath(QStringLiteral("assets"));
+            } else if (!m_stagingAssetsDir.isEmpty()) {
+                assetsDir = QDir(m_stagingAssetsDir).filePath(QStringLiteral("assets"));
             } else {
-                assetsDir = QDir::current().filePath(QStringLiteral("assets"));
+                assetsDir = QDir::tempPath() + QStringLiteral("/MarkdownNativeEditor_draft/assets");
             }
             QDir().mkpath(assetsDir);
 

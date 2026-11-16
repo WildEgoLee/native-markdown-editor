@@ -56,6 +56,9 @@ public:
     void setDocumentPath(const QString &path);
     const QString &documentPath() const { return m_documentPath; }
 
+    void setStagingAssetsDir(const QString &dir) { m_stagingAssetsDir = dir; }
+    const QString &stagingAssetsDir() const { return m_stagingAssetsDir; }
+
     const Mapping::DisplayProjection &projection() const { return m_projection; }
     const LayoutEngine &layoutEngine() const { return m_layoutEngine; }
 
@@ -170,6 +173,7 @@ private:
     int m_accumulatedZoomDelta = 0;
     bool m_isVisualRefreshing = false;
     QString m_documentPath;
+    QString m_stagingAssetsDir;
 };
 
 } // namespace MarkdownTool::Editor

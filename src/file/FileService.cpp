@@ -282,4 +282,56 @@ QStringList FileService::findUntitledRecoverySnapshots() {
     return result;
 }
 
+QString FileService::untitledDraftAssetsDirectory(const QString &untitledId) {
+    if (untitledId.isEmpty()) {
+        return QString();
+    }
+    QString recDir = recoveryDirectory();
+    QDir dir(recDir + QStringLiteral("/draft_assets/") + untitledId);
+    if (!dir.exists()) {
+        dir.mkpath(QStringLiteral("."));
+    }
+    return dir.absolutePath();
+}
+
+void FileService::removeUntitledDraftAssetsDirectory(const QString &untitledId) {
+    if (untitledId.isEmpty()) {
+        return;
+    }
+    QString recDir = recoveryDirectory();
+    QDir dir(recDir + QStringLiteral("/draft_assets/") + untitledId);
+    if (dir.exists()) {
+        dir.removeRecursively();
+    }
+}
+
+bool FileService::relocateDraftAssets(const QString &untitledId, const QString &targetDocumentPath) {
+    if (untitledId.isEmpty() || targetDocumentPath.isEmpty()) {
+        return false;
+    }
+    QString recDir = recoveryDirectory();
+    QDir draftAssetsDir(recDir + QStringLiteral("/draft_assets/") + untitledId + QStringLiteral("/assets"));
+    if (!draftAssetsDir.exists()) {
+        return true; // Nothing to relocate
+    }
+
+    QDir targetDir = QFileInfo(targetDocumentPath).dir();
+    if (!targetDir.mkpath(QStringLiteral("assets"))) {
+        return false;
+    }
+    QString targetAssetsPath = targetDir.filePath(QStringLiteral("assets"));
+
+    QFileInfoList files = draftAssetsDir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot);
+    for (const auto &fi : files) {
+        QString destFile = QDir(targetAssetsPath).filePath(fi.fileName());
+        if (QFile::exists(destFile)) {
+            QFile::remove(destFile);
+        }
+        if (!QFile::copy(fi.absoluteFilePath(), destFile)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace MarkdownTool::File

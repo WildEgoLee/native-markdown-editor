@@ -40,6 +40,9 @@
 #include <QListView>
 #include <QMenu>
 #include <QAction>
+#include <QApplication>
+#include <QMessageBox>
+#include <QAbstractButton>
 
 using namespace MarkdownTool;
 
@@ -118,6 +121,10 @@ private slots:
     void testExternalFileModificationWatcher();
     void testInPlaceImageRenderingAndPaste();
     void testMultiDocumentTabsAndSwitching();
+    void testTabReorderPreservesDocumentIdentity();
+    void testUntitledImagePasteSaveAsRelocatesAssets();
+    void testMultipleUntitledDraftsRecovery();
+    void testCancelledWindowClosePreservesRecoverySnapshots();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempSettingsDir;
@@ -5472,6 +5479,235 @@ void TestProbes::testMultiDocumentTabsAndSwitching() {
     win.closeCurrentTab(false); // Close remaining tab
     QCOMPARE(win.tabCount(), 1); // Automatically resets to clean untitled tab
     QVERIFY(win.session().isUntitled());
+}
+
+void TestProbes::testTabReorderPreservesDocumentIdentity() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString docAPath = tempDir.filePath(QStringLiteral("docA.md"));
+    QString docBPath = tempDir.filePath(QStringLiteral("docB.md"));
+    QString docCPath = tempDir.filePath(QStringLiteral("docC.md"));
+
+    {
+        QFile f(docAPath);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("# 文档 A\n");
+    }
+    {
+        QFile f(docBPath);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("# 文档 B\n");
+    }
+    {
+        QFile f(docCPath);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("# 文档 C\n");
+    }
+
+    UI::MainWindow win;
+    QVERIFY(win.openFile(docAPath, false));
+    QVERIFY(win.openFile(docBPath, false));
+    QVERIFY(win.openFile(docCPath, false));
+    QCOMPARE(win.tabCount(), 3);
+
+    // Initial state: 0 -> A, 1 -> B, 2 -> C
+    QCOMPARE(win.tabInfoAt(0)->session.filePath(), docAPath);
+    QCOMPARE(win.tabInfoAt(1)->session.filePath(), docBPath);
+    QCOMPARE(win.tabInfoAt(2)->session.filePath(), docCPath);
+
+    // Move tab 0 to 2 (Order becomes: B, C, A)
+    win.tabWidget()->tabBar()->moveTab(0, 2);
+
+    QCOMPARE(win.tabCount(), 3);
+    QCOMPARE(win.tabInfoAt(0)->session.filePath(), docBPath);
+    QCOMPARE(win.tabInfoAt(1)->session.filePath(), docCPath);
+    QCOMPARE(win.tabInfoAt(2)->session.filePath(), docAPath);
+
+    // Switch to tab 0 (which is now docB)
+    win.switchToTab(0);
+    QCOMPARE(win.currentTabIndex(), 0);
+    QCOMPARE(win.currentTabInfo()->session.filePath(), docBPath);
+    QCOMPARE(win.editorView()->buffer().text(), QStringLiteral("# 文档 B\n"));
+
+    // Edit tab 0
+    win.editorView()->buffer().replace(0, 0, QStringLiteral("修改前缀-"));
+    win.editorView()->undoStack().markDirty();
+    QVERIFY(win.tabInfoAt(0)->view->undoStack().isDirty());
+    QVERIFY(win.tabWidget()->tabText(0).contains(QStringLiteral("●")));
+    QVERIFY(!win.tabInfoAt(2)->view->undoStack().isDirty()); // docA should NOT be dirty
+
+    // Save tab 0 -> saves docBPath
+    QVERIFY(win.saveTab(0, false));
+    QVERIFY(!win.tabInfoAt(0)->view->undoStack().isDirty());
+    {
+        QFile fb(docBPath);
+        QVERIFY(fb.open(QIODevice::ReadOnly));
+        QString content = QString::fromUtf8(fb.readAll());
+        QVERIFY(content.startsWith(QStringLiteral("修改前缀-")));
+    }
+    // Verify docA was untouched
+    {
+        QFile fa(docAPath);
+        QVERIFY(fa.open(QIODevice::ReadOnly));
+        QString content = QString::fromUtf8(fa.readAll());
+        QCOMPARE(content, QStringLiteral("# 文档 A\n"));
+    }
+
+    // Close tab 2 (which is docA)
+    QVERIFY(win.closeTab(2, false));
+    QCOMPARE(win.tabCount(), 2);
+    QCOMPARE(win.tabInfoAt(0)->session.filePath(), docBPath);
+    QCOMPARE(win.tabInfoAt(1)->session.filePath(), docCPath);
+}
+
+void TestProbes::testUntitledImagePasteSaveAsRelocatesAssets() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString targetDocPath = tempDir.filePath(QStringLiteral("subfolder/my_saved_doc.md"));
+
+    UI::MainWindow win;
+    QCOMPARE(win.tabCount(), 1);
+    QVERIFY(win.session().isUntitled());
+
+    // Generate a test image and place in clipboard
+    QImage testImage(64, 64, QImage::Format_RGB32);
+    testImage.fill(QColor(40, 140, 240));
+    QGuiApplication::clipboard()->setImage(testImage);
+
+    // Paste image into untitled tab
+    win.editorView()->paste();
+    QString bufferText = win.editorView()->buffer().text();
+    QVERIFY(bufferText.contains(QStringLiteral("![image](assets/image_")));
+
+    // Extract relative path
+    QRegularExpression re(QStringLiteral("assets/image_[0-9_]+\\.png"));
+    QRegularExpressionMatch match = re.match(bufferText);
+    QVERIFY(match.hasMatch());
+    QString relPath = match.captured(0);
+
+    // Verify ImageService resolves image path from staging
+    QString stagedPath = Render::ImageService::instance()->resolveImagePath(relPath);
+    QVERIFY(QFile::exists(stagedPath));
+    QVERIFY(stagedPath.contains(QStringLiteral("draft_assets")));
+
+    // Save As to targetDocPath in subfolder
+    QVERIFY(win.saveTabAs(0, targetDocPath, false));
+
+    // Verify document file exists on disk
+    QVERIFY(QFile::exists(targetDocPath));
+
+    // Verify relocated asset exists in targetDocPath's assets directory
+    QDir targetDir = QFileInfo(targetDocPath).dir();
+    QString relocatedImagePath = targetDir.filePath(relPath);
+    QVERIFY2(QFile::exists(relocatedImagePath), qPrintable(relocatedImagePath));
+
+    // Verify draft assets staging directory was cleaned up
+    QVERIFY(!QFile::exists(stagedPath));
+
+    // Verify ImageService now resolves the relocated image directly
+    Render::ImageService::instance()->setDocumentPath(targetDocPath);
+    QString resolvedAfterSave = Render::ImageService::instance()->resolveImagePath(relPath);
+    QCOMPARE(QFileInfo(resolvedAfterSave).canonicalFilePath(), QFileInfo(relocatedImagePath).canonicalFilePath());
+}
+
+void TestProbes::testMultipleUntitledDraftsRecovery() {
+    // 1. Write 3 untitled recovery snapshots
+    Core::TextBuffer b1, b2, b3;
+    b1.insert(0, QStringLiteral("草稿一内容"));
+    b2.insert(0, QStringLiteral("草稿二内容"));
+    b3.insert(0, QStringLiteral("草稿三内容"));
+
+    QString id1 = QStringLiteral("test-uuid-001");
+    QString id2 = QStringLiteral("test-uuid-002");
+    QString id3 = QStringLiteral("test-uuid-003");
+
+    File::FileService::writeUntitledRecoverySnapshot(id1, b1);
+    File::FileService::writeUntitledRecoverySnapshot(id2, b2);
+    File::FileService::writeUntitledRecoverySnapshot(id3, b3);
+
+    auto list = File::FileService::findUntitledRecoverySnapshots();
+    QCOMPARE(list.size(), 3);
+
+    // 2. Launch MainWindow and check untitled recovery
+    UI::MainWindow win;
+    bool recovered = win.checkUntitledRecoverySnapshot(false);
+    QVERIFY(recovered);
+
+    // 3. Verify all 3 drafts were restored into distinct tabs
+    QCOMPARE(win.tabCount(), 3);
+
+    QStringList restoredTexts;
+    for (int i = 0; i < win.tabCount(); ++i) {
+        restoredTexts.append(win.tabInfoAt(i)->view->buffer().text());
+        QVERIFY(win.tabInfoAt(i)->session.isUntitled());
+        QVERIFY(win.tabInfoAt(i)->view->undoStack().isDirty());
+    }
+    QVERIFY(restoredTexts.contains(QStringLiteral("草稿一内容")));
+    QVERIFY(restoredTexts.contains(QStringLiteral("草稿二内容")));
+    QVERIFY(restoredTexts.contains(QStringLiteral("草稿三内容")));
+
+    // 4. Verify snapshot files were cleaned up from disk
+    auto remaining = File::FileService::findUntitledRecoverySnapshots();
+    QVERIFY(remaining.isEmpty());
+}
+
+void TestProbes::testCancelledWindowClosePreservesRecoverySnapshots() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString doc1Path = tempDir.filePath(QStringLiteral("clean_doc.md"));
+    {
+        QFile f(doc1Path);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("# 干净文档\n");
+    }
+
+    UI::MainWindow win;
+    QVERIFY(win.openFile(doc1Path, false));
+    win.newFile();
+    QCOMPARE(win.tabCount(), 2);
+
+    // Tab 1 is untitled and dirty
+    win.editorView()->buffer().replace(0, 0, QStringLiteral("未保存的珍贵草稿"));
+    win.editorView()->undoStack().markDirty();
+
+    QString untitledId = win.tabInfoAt(1)->session.untitledId();
+    // Trigger recovery snapshot write
+    File::FileService::writeRecoverySnapshot(doc1Path, win.tabInfoAt(0)->view->buffer());
+    File::FileService::writeUntitledRecoverySnapshot(untitledId, win.tabInfoAt(1)->view->buffer());
+
+    QString rec1 = File::FileService::findRecoverySnapshot(doc1Path);
+    QString rec2 = File::FileService::findUntitledRecoverySnapshot(untitledId);
+    QVERIFY(!rec1.isEmpty());
+    QVERIFY(!rec2.isEmpty());
+
+    // When closing, simulate user clicking Cancel on modal dialog
+    QTimer::singleShot(100, []() {
+        QWidget *modal = QApplication::activeModalWidget();
+        auto *box = qobject_cast<QMessageBox*>(modal);
+        if (box) {
+            QAbstractButton *btn = box->button(QMessageBox::Cancel);
+            if (btn) {
+                btn->click();
+            }
+        }
+    });
+
+    bool closed = win.closeAllTabs(true);
+    QVERIFY(!closed);
+
+    // Both tabs remain open
+    QCOMPARE(win.tabCount(), 2);
+
+    // Snapshots MUST be preserved!
+    QVERIFY(!File::FileService::findRecoverySnapshot(doc1Path).isEmpty());
+    QVERIFY(!File::FileService::findUntitledRecoverySnapshot(untitledId).isEmpty());
+
+    // Now close non-interactively
+    QVERIFY(win.closeAllTabs(false));
+
+    // Both snapshots are safely cleaned up after full confirmed close
+    QVERIFY(File::FileService::findRecoverySnapshot(doc1Path).isEmpty());
+    QVERIFY(File::FileService::findUntitledRecoverySnapshot(untitledId).isEmpty());
 }
 
 QTEST_MAIN(TestProbes)

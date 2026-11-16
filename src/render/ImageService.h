@@ -15,6 +15,9 @@ public:
     void setDocumentPath(const QString &docPath);
     QString documentPath() const;
 
+    void setStagingAssetsDir(const QString &stagingDir);
+    QString stagingAssetsDir() const;
+
     QString resolveImagePath(const QString &rawPath) const;
     QPixmap getImage(const QString &rawPath);
     QSize getImageSize(const QString &rawPath, qreal maxDisplayWidth = 800.0);
@@ -27,6 +30,7 @@ private:
 
     mutable QMutex m_mutex;
     QString m_documentPath;
+    QString m_stagingAssetsDir;
     QCache<QString, QPixmap> m_cache;
 };
 

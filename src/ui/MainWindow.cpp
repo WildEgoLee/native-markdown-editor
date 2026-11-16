@@ -66,7 +66,7 @@ void MainWindow::setupUi() {
     m_findBar = new FindReplaceBar(editorContainer);
     m_findBar->hide();
 
-    m_tabWidget = new QTabWidget(editorContainer);
+    m_tabWidget = new DocumentTabWidget(editorContainer);
     m_tabWidget->setTabsClosable(true);
     m_tabWidget->setMovable(true);
     m_tabWidget->setDocumentMode(true);
@@ -86,6 +86,7 @@ void MainWindow::setupUi() {
     // Tab Widget wiring
     connect(m_tabWidget, &QTabWidget::currentChanged, this, &MainWindow::onCurrentTabChanged);
     connect(m_tabWidget, &QTabWidget::tabCloseRequested, this, [this](int idx) { closeTab(idx); });
+    connect(m_tabWidget->tabBar(), &QTabBar::tabMoved, this, &MainWindow::onTabMoved);
 
     // Outline debounce timer
     m_outlineDebounceTimer = new QTimer(this);
@@ -488,27 +489,48 @@ MainWindow::TabInfo *MainWindow::currentTabInfo() const {
 }
 
 MainWindow::TabInfo *MainWindow::tabInfoAt(int index) const {
-    if (index >= 0 && index < m_tabs.size()) {
+    if (!m_tabWidget || index < 0 || index >= m_tabWidget->count()) {
+        return nullptr;
+    }
+    if (index < static_cast<int>(m_tabs.size()) && m_tabs[index]->view == m_tabWidget->widget(index)) {
         return m_tabs[index].get();
+    }
+    QWidget *target = m_tabWidget->widget(index);
+    for (const auto &tab : m_tabs) {
+        if (tab->view == target) {
+            return tab.get();
+        }
     }
     return nullptr;
 }
 
 int MainWindow::findTabIndexByPath(const QString &path) const {
-    if (path.isEmpty()) return -1;
+    if (path.isEmpty() || !m_tabWidget) return -1;
     QString target = QFileInfo(path).canonicalFilePath();
     if (target.isEmpty()) target = QFileInfo(path).absoluteFilePath();
 
-    for (int i = 0; i < m_tabs.size(); ++i) {
-        if (!m_tabs[i]->session.filePath().isEmpty()) {
-            QString cur = QFileInfo(m_tabs[i]->session.filePath()).canonicalFilePath();
-            if (cur.isEmpty()) cur = QFileInfo(m_tabs[i]->session.filePath()).absoluteFilePath();
-            if (cur == target) {
-                return i;
+    for (int i = 0; i < m_tabWidget->count(); ++i) {
+        if (auto *tab = tabInfoAt(i)) {
+            if (!tab->session.filePath().isEmpty()) {
+                QString cur = QFileInfo(tab->session.filePath()).canonicalFilePath();
+                if (cur.isEmpty()) cur = QFileInfo(tab->session.filePath()).absoluteFilePath();
+                if (cur == target) {
+                    return i;
+                }
             }
         }
     }
     return -1;
+}
+
+void MainWindow::onTabMoved(int from, int to) {
+    if (from < 0 || from >= static_cast<int>(m_tabs.size()) ||
+        to < 0 || to >= static_cast<int>(m_tabs.size()) || from == to) {
+        return;
+    }
+    auto item = std::move(m_tabs[from]);
+    m_tabs.erase(m_tabs.begin() + from);
+    m_tabs.insert(m_tabs.begin() + to, std::move(item));
 }
 
 void MainWindow::setupEditorViewConnections(Editor::NativeEditorView *view) {
@@ -531,13 +553,15 @@ void MainWindow::setupEditorViewConnections(Editor::NativeEditorView *view) {
     });
 
     connect(&view->undoStack(), &Core::UndoStack::cleanStateChanged, this, [this, view](bool) {
-        for (int i = 0; i < m_tabs.size(); ++i) {
-            if (m_tabs[i]->view == view) {
-                updateTabTitle(i);
-                if (m_editorView == view) {
-                    onCleanStateChanged(!view->undoStack().isDirty());
+        for (int i = 0; i < m_tabWidget->count(); ++i) {
+            if (auto *tab = tabInfoAt(i)) {
+                if (tab->view == view) {
+                    updateTabTitle(i);
+                    if (m_editorView == view) {
+                        onCleanStateChanged(!view->undoStack().isDirty());
+                    }
+                    break;
                 }
-                break;
             }
         }
     });
@@ -570,11 +594,11 @@ int MainWindow::createTab(const QString &filePath, bool makeCurrent, bool intera
     auto tab = std::make_unique<TabInfo>();
     tab->view = view;
 
-    int newIdx = m_tabs.size();
     if (filePath.isEmpty()) {
         tab->untitledNumber = m_nextUntitledNumber++;
         tab->session.resetToUntitled(view->buffer());
         view->setDocumentPath(QString());
+        view->setStagingAssetsDir(File::FileService::untitledDraftAssetsDirectory(tab->session.untitledId()));
     }
 
     QString baseTitle = tab->session.isUntitled()
@@ -586,7 +610,18 @@ int MainWindow::createTab(const QString &filePath, bool makeCurrent, bool intera
     m_tabs.push_back(std::move(tab));
 
     if (!filePath.isEmpty()) {
-        loadFileIntoTab(tabIdx, filePath, interactive);
+        if (!loadFileIntoTab(tabIdx, filePath, interactive)) {
+            QWidget *w = m_tabWidget->widget(tabIdx);
+            m_tabWidget->removeTab(tabIdx);
+            for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
+                if ((*it)->view == view) {
+                    m_tabs.erase(it);
+                    break;
+                }
+            }
+            delete w;
+            return -1;
+        }
     }
 
     if (makeCurrent) {
@@ -598,12 +633,14 @@ int MainWindow::createTab(const QString &filePath, bool makeCurrent, bool intera
 }
 
 void MainWindow::updateTabTitle(int index) {
-    if (index < 0 || index >= m_tabs.size()) return;
-    const auto &tab = m_tabs[index];
+    TabInfo *tab = tabInfoAt(index);
+    if (!tab) return;
     QString baseName = tab->session.isUntitled()
         ? (tab->untitledNumber > 0 ? QStringLiteral("未命名-%1").arg(tab->untitledNumber) : QStringLiteral("未命名文档"))
         : tab->session.displayName();
-    if (tab->view->undoStack().isDirty()) {
+    if (tab->hasPendingExternalConflict) {
+        baseName.append(QStringLiteral(" [外部冲突]"));
+    } else if (tab->view->undoStack().isDirty()) {
         baseName.append(QStringLiteral(" ●"));
     }
     m_tabWidget->setTabText(index, baseName);
@@ -611,16 +648,28 @@ void MainWindow::updateTabTitle(int index) {
 }
 
 void MainWindow::onCurrentTabChanged(int index) {
-    if (index >= 0 && index < m_tabs.size()) {
-        m_editorView = m_tabs[index]->view;
-        Render::ImageService::instance()->setDocumentPath(m_tabs[index]->session.filePath());
+    TabInfo *tab = tabInfoAt(index);
+    if (tab) {
+        m_editorView = tab->view;
+        Render::ImageService::instance()->setDocumentPath(tab->session.filePath());
+        if (tab->session.isUntitled()) {
+            Render::ImageService::instance()->setStagingAssetsDir(File::FileService::untitledDraftAssetsDirectory(tab->session.untitledId()));
+        } else {
+            Render::ImageService::instance()->setStagingAssetsDir(QString());
+        }
     } else {
         m_editorView = nullptr;
     }
 
     updateTitle();
 
-    if (m_editorView) {
+    if (m_editorView && tab) {
+        if (tab->hasPendingExternalConflict) {
+            tab->hasPendingExternalConflict = false;
+            updateTabTitle(index);
+            handleExternalFileModification(true);
+        }
+
         auto lc = m_editorView->buffer().offsetToLineCol(m_editorView->cursorPos());
         updateStatusBar(lc.line1(), lc.col1(), m_editorView->cursorPos());
         if (m_statusModeLabel) m_statusModeLabel->setText(m_editorView->isSourceMode() ? QStringLiteral("源码模式") : QStringLiteral("即时预览"));
@@ -642,11 +691,15 @@ void MainWindow::onCurrentTabChanged(int index) {
 }
 
 bool MainWindow::closeTab(int index, bool interactive) {
-    if (index < 0 || index >= m_tabs.size()) {
+    if (index < 0 || index >= m_tabWidget->count()) {
         return false;
     }
 
-    auto &tab = m_tabs[index];
+    TabInfo *tab = tabInfoAt(index);
+    if (!tab) {
+        return false;
+    }
+
     if (tab->view->undoStack().isDirty()) {
         if (interactive) {
             m_tabWidget->setCurrentIndex(index);
@@ -664,16 +717,23 @@ bool MainWindow::closeTab(int index, bool interactive) {
         }
     }
 
-    // Clean up recovery snapshot
+    // Clean up recovery snapshot and draft assets
     if (tab->session.isUntitled()) {
         File::FileService::removeUntitledRecoverySnapshot(tab->session.untitledId());
+        File::FileService::removeUntitledDraftAssetsDirectory(tab->session.untitledId());
     } else {
         File::FileService::removeRecoverySnapshot(tab->session.filePath());
     }
 
     QWidget *viewWidget = m_tabWidget->widget(index);
     m_tabWidget->removeTab(index);
-    m_tabs.erase(m_tabs.begin() + index);
+
+    for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
+        if ((*it)->view == viewWidget) {
+            m_tabs.erase(it);
+            break;
+        }
+    }
     delete viewWidget;
 
     updateFileWatcher();
@@ -692,13 +752,16 @@ bool MainWindow::closeCurrentTab(bool interactive) {
 }
 
 bool MainWindow::closeAllTabs(bool interactive) {
-    for (int i = m_tabs.size() - 1; i >= 0; --i) {
-        if (m_tabs[i]->view->undoStack().isDirty()) {
-            m_tabWidget->setCurrentIndex(i);
+    // Phase 1: Confirmation pass. Validate all dirty tabs without deleting any snapshots
+    for (int i = 0; i < m_tabWidget->count(); ++i) {
+        TabInfo *tab = tabInfoAt(i);
+        if (!tab) continue;
+        if (tab->view->undoStack().isDirty()) {
             if (interactive) {
+                m_tabWidget->setCurrentIndex(i);
                 auto ret = QMessageBox::warning(this,
                                                 QStringLiteral("未保存更改"),
-                                                QStringLiteral("文档 \"%1\" 已被修改，是否保存？").arg(m_tabs[i]->session.displayName()),
+                                                QStringLiteral("文档 \"%1\" 已被修改，是否保存？").arg(tab->session.displayName()),
                                                 QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
                 if (ret == QMessageBox::Save) {
                     if (!saveTab(i, interactive)) return false;
@@ -707,12 +770,26 @@ bool MainWindow::closeAllTabs(bool interactive) {
                 }
             }
         }
-        if (m_tabs[i]->session.isUntitled()) {
-            File::FileService::removeUntitledRecoverySnapshot(m_tabs[i]->session.untitledId());
-        } else {
-            File::FileService::removeRecoverySnapshot(m_tabs[i]->session.filePath());
-        }
     }
+
+    // Phase 2: All tabs confirmed! Clean up snapshots, draft assets, and close widgets
+    for (int i = m_tabWidget->count() - 1; i >= 0; --i) {
+        TabInfo *tab = tabInfoAt(i);
+        if (tab) {
+            if (tab->session.isUntitled()) {
+                File::FileService::removeUntitledRecoverySnapshot(tab->session.untitledId());
+                File::FileService::removeUntitledDraftAssetsDirectory(tab->session.untitledId());
+            } else {
+                File::FileService::removeRecoverySnapshot(tab->session.filePath());
+            }
+        }
+        QWidget *w = m_tabWidget->widget(i);
+        m_tabWidget->removeTab(i);
+        delete w;
+    }
+    m_tabs.clear();
+
+    updateFileWatcher();
     return true;
 }
 
@@ -893,47 +970,64 @@ void MainWindow::onRecoveryTimer() {
 }
 
 bool MainWindow::checkUntitledRecoverySnapshot(bool interactive) {
-    if (m_tabs.empty()) {
-        return false;
-    }
     auto snapshots = File::FileService::findUntitledRecoverySnapshots();
     if (snapshots.isEmpty()) {
         return false;
     }
-    QString recPath = snapshots.first();
-    auto &tab = m_tabs[0];
+
     if (interactive) {
+        QString msg = (snapshots.size() == 1)
+            ? QStringLiteral("检测到上次运行遗留了 1 份未保存的未命名文档草稿，是否恢复？")
+            : QStringLiteral("检测到上次运行遗留了 %1 份未保存的未命名文档草稿，是否全部恢复？").arg(snapshots.size());
         auto btn = QMessageBox::question(
             this,
             QStringLiteral("发现未命名文档恢复草稿"),
-            QStringLiteral("检测到上次运行遗留了未保存的未命名文档草稿，是否恢复？"),
+            msg,
             QMessageBox::Yes | QMessageBox::No);
-        if (btn == QMessageBox::Yes) {
-            QString err;
-            if (File::FileService::loadFile(recPath, tab->view->buffer(), err)) {
-                tab->view->undoStack().clear(true);
-                updateTabTitle(0);
-                updateTitle();
-                QFile::remove(recPath);
-                return true;
-            } else {
-                QMessageBox::warning(this, QStringLiteral("恢复失败"), QStringLiteral("无法加载恢复草稿: ") + err);
-            }
-        } else {
+        if (btn != QMessageBox::Yes) {
             for (const auto &p : snapshots) {
                 QFile::remove(p);
             }
-        }
-    } else {
-        QString err;
-        if (File::FileService::loadFile(recPath, tab->view->buffer(), err)) {
-            tab->view->undoStack().clear(true);
-            updateTabTitle(0);
-            updateTitle();
-            QFile::remove(recPath);
-            return true;
+            return false;
         }
     }
+
+    int restoredCount = 0;
+    for (int i = 0; i < snapshots.size(); ++i) {
+        const QString &recPath = snapshots[i];
+        int targetTabIdx = -1;
+        if (i == 0 && m_tabWidget->count() == 1) {
+            TabInfo *firstTab = tabInfoAt(0);
+            if (firstTab && firstTab->session.isUntitled() &&
+                !firstTab->view->undoStack().isDirty() && firstTab->view->buffer().isEmpty()) {
+                targetTabIdx = 0;
+            }
+        }
+        if (targetTabIdx < 0) {
+            targetTabIdx = createTab(QString(), false);
+        }
+
+        if (targetTabIdx >= 0) {
+            TabInfo *tab = tabInfoAt(targetTabIdx);
+            if (tab) {
+                QString err;
+                if (File::FileService::loadFile(recPath, tab->view->buffer(), err)) {
+                    tab->view->undoStack().clear(true);
+                    updateTabTitle(targetTabIdx);
+                    QFile::remove(recPath);
+                    restoredCount++;
+                }
+            }
+        }
+    }
+
+    if (restoredCount > 0) {
+        m_tabWidget->setCurrentIndex(0);
+        onCurrentTabChanged(0);
+        updateTitle();
+        return true;
+    }
+
     return false;
 }
 
@@ -946,10 +1040,12 @@ void MainWindow::updateFileWatcher() {
         m_fileWatcher->removePaths(watched);
     }
     QStringList pathsToWatch;
-    for (const auto &tab : m_tabs) {
-        if (!tab->session.isUntitled() && !tab->session.filePath().isEmpty()) {
-            if (QFile::exists(tab->session.filePath())) {
-                pathsToWatch.append(tab->session.filePath());
+    for (int i = 0; i < m_tabWidget->count(); ++i) {
+        if (auto *tab = tabInfoAt(i)) {
+            if (!tab->session.isUntitled() && !tab->session.filePath().isEmpty()) {
+                if (QFile::exists(tab->session.filePath())) {
+                    pathsToWatch.append(tab->session.filePath());
+                }
             }
         }
     }
@@ -982,10 +1078,10 @@ void MainWindow::onExternalFileChanged(const QString &path) {
 
 void MainWindow::handleExternalFileModification(bool interactive) {
     int curIdx = currentTabIndex();
-    if (curIdx < 0 || curIdx >= m_tabs.size()) {
+    TabInfo *tab = tabInfoAt(curIdx);
+    if (!tab) {
         return;
     }
-    auto &tab = m_tabs[curIdx];
     const QString filePath = tab->session.filePath();
     if (filePath.isEmpty() || tab->session.isUntitled() || !QFile::exists(filePath)) {
         return;
@@ -1027,15 +1123,24 @@ void MainWindow::handleExternalFileModification(bool interactive) {
 }
 
 void MainWindow::handleAllExternalFileModifications(bool interactive) {
-    for (int i = 0; i < m_tabs.size(); ++i) {
-        auto &tab = m_tabs[i];
-        if (tab->session.isUntitled() || tab->session.filePath().isEmpty()) continue;
+    int cur = currentTabIndex();
+    for (int i = 0; i < m_tabWidget->count(); ++i) {
+        TabInfo *tab = tabInfoAt(i);
+        if (!tab || tab->session.isUntitled() || tab->session.filePath().isEmpty()) continue;
         if (!QFile::exists(tab->session.filePath())) continue;
         if (File::FileService::hasExternalModification(tab->session.filePath(), tab->session.lastKnownHash())) {
-            if (i == currentTabIndex()) {
+            QByteArray currentHash = File::FileService::calculateFileHash(tab->session.filePath());
+            if (!tab->suppressedExternalChangeHash.isEmpty() && currentHash == tab->suppressedExternalChangeHash) {
+                continue;
+            }
+
+            if (i == cur) {
                 handleExternalFileModification(interactive);
             } else if (!tab->view->undoStack().isDirty()) {
                 reloadTab(i);
+            } else {
+                tab->hasPendingExternalConflict = true;
+                updateTabTitle(i);
             }
         }
     }
@@ -1046,10 +1151,10 @@ bool MainWindow::reloadCurrentFile() {
 }
 
 bool MainWindow::reloadTab(int index) {
-    if (index < 0 || index >= m_tabs.size()) {
+    TabInfo *tab = tabInfoAt(index);
+    if (!tab) {
         return false;
     }
-    auto &tab = m_tabs[index];
     if (tab->session.isUntitled() || tab->session.filePath().isEmpty()) {
         return false;
     }
@@ -1060,6 +1165,7 @@ bool MainWindow::reloadTab(int index) {
     tab->view->undoStack().clear();
     tab->view->undoStack().setSaveCheckpoint();
     tab->suppressedExternalChangeHash.clear();
+    tab->hasPendingExternalConflict = false;
     updateTabTitle(index);
     updateTitle();
     updateFileWatcher();
@@ -1110,17 +1216,23 @@ bool MainWindow::openFile(const QString &filePath, bool interactive) {
     }
 
     // If there is only 1 tab and it is untitled, clean, and empty, reuse it!
-    if (m_tabs.size() == 1 &&
-        m_tabs[0]->session.isUntitled() &&
-        !m_tabs[0]->view->undoStack().isDirty() &&
-        m_tabs[0]->view->buffer().isEmpty()) {
+    if (m_tabWidget->count() == 1) {
+        TabInfo *firstTab = tabInfoAt(0);
+        if (firstTab &&
+            firstTab->session.isUntitled() &&
+            !firstTab->view->undoStack().isDirty() &&
+            firstTab->view->buffer().isEmpty()) {
 
-        bool ok = loadFileIntoTab(0, filePath, interactive);
-        if (ok) {
-            m_tabWidget->setCurrentIndex(0);
-            onCurrentTabChanged(0);
+            QString oldUntitledId = firstTab->session.untitledId();
+            bool ok = loadFileIntoTab(0, filePath, interactive);
+            if (ok) {
+                File::FileService::removeUntitledDraftAssetsDirectory(oldUntitledId);
+                firstTab->view->setStagingAssetsDir(QString());
+                m_tabWidget->setCurrentIndex(0);
+                onCurrentTabChanged(0);
+            }
+            return ok;
         }
-        return ok;
     }
 
     // Otherwise, create a new tab and load file into it
@@ -1129,10 +1241,10 @@ bool MainWindow::openFile(const QString &filePath, bool interactive) {
 }
 
 bool MainWindow::loadFileIntoTab(int index, const QString &filePath, bool interactive) {
-    if (index < 0 || index >= m_tabs.size()) {
+    TabInfo *tab = tabInfoAt(index);
+    if (!tab) {
         return false;
     }
-    auto &tab = m_tabs[index];
 
     // Check for crash recovery snapshot
     QString recPath = File::FileService::findRecoverySnapshot(filePath);
@@ -1146,8 +1258,10 @@ bool MainWindow::loadFileIntoTab(int index, const QString &filePath, bool intera
             if (File::FileService::loadFile(recPath, tab->view->buffer(), err)) {
                 tab->session.attachFile(filePath);
                 tab->view->setDocumentPath(filePath);
+                tab->view->setStagingAssetsDir(QString());
                 addRecentFile(filePath);
                 tab->suppressedExternalChangeHash.clear();
+                tab->hasPendingExternalConflict = false;
                 tab->view->undoStack().clear(true);
                 updateTabTitle(index);
                 updateTitle();
@@ -1170,10 +1284,12 @@ bool MainWindow::loadFileIntoTab(int index, const QString &filePath, bool intera
     }
 
     tab->view->setDocumentPath(filePath);
+    tab->view->setStagingAssetsDir(QString());
     tab->view->undoStack().clear();
     tab->view->undoStack().setSaveCheckpoint();
     addRecentFile(filePath);
     tab->suppressedExternalChangeHash.clear();
+    tab->hasPendingExternalConflict = false;
     updateTabTitle(index);
     updateTitle();
     updateFileWatcher();
@@ -1184,17 +1300,17 @@ bool MainWindow::saveFile(bool interactive, bool forceOverwrite) {
     return saveTab(currentTabIndex(), interactive, forceOverwrite);
 }
 
-bool MainWindow::saveFileAs(bool interactive) {
-    return saveTabAs(currentTabIndex(), interactive);
+bool MainWindow::saveFileAs(const QString &targetPath, bool interactive) {
+    return saveTabAs(currentTabIndex(), targetPath, interactive);
 }
 
 bool MainWindow::saveTab(int index, bool interactive, bool forceOverwrite) {
-    if (index < 0 || index >= m_tabs.size()) {
+    TabInfo *tab = tabInfoAt(index);
+    if (!tab) {
         return false;
     }
-    auto &tab = m_tabs[index];
     if (tab->session.isUntitled()) {
-        return saveTabAs(index, interactive);
+        return saveTabAs(index, QString(), interactive);
     }
 
     struct SaveGuard {
@@ -1217,6 +1333,7 @@ bool MainWindow::saveTab(int index, bool interactive, bool forceOverwrite) {
                         tab->view->undoStack().setSaveCheckpoint();
                         tab->view->setDocumentPath(tab->session.filePath());
                         tab->suppressedExternalChangeHash.clear();
+                        tab->hasPendingExternalConflict = false;
                         addRecentFile(tab->session.filePath());
                         updateTabTitle(index);
                         updateTitle();
@@ -1240,6 +1357,7 @@ bool MainWindow::saveTab(int index, bool interactive, bool forceOverwrite) {
     tab->view->undoStack().setSaveCheckpoint();
     tab->view->setDocumentPath(tab->session.filePath());
     tab->suppressedExternalChangeHash.clear();
+    tab->hasPendingExternalConflict = false;
     addRecentFile(tab->session.filePath());
     updateTabTitle(index);
     updateTitle();
@@ -1247,22 +1365,24 @@ bool MainWindow::saveTab(int index, bool interactive, bool forceOverwrite) {
     return true;
 }
 
-bool MainWindow::saveTabAs(int index, bool interactive) {
-    if (index < 0 || index >= m_tabs.size()) {
+bool MainWindow::saveTabAs(int index, const QString &targetPath, bool interactive) {
+    TabInfo *tab = tabInfoAt(index);
+    if (!tab) {
         return false;
     }
-    auto &tab = m_tabs[index];
-    QString path;
-    if (interactive) {
-        QString defaultPath = tab->session.isUntitled() ? QStringLiteral("未命名.md") : tab->session.filePath();
-        path = QFileDialog::getSaveFileName(this, QStringLiteral("另存为"), defaultPath, QStringLiteral("Markdown Files (*.md);;All Files (*.*)"));
-        if (path.isEmpty()) {
-            return false;
-        }
-    } else {
-        path = tab->session.filePath();
-        if (path.isEmpty()) {
-            return false;
+    QString path = targetPath;
+    if (path.isEmpty()) {
+        if (interactive) {
+            QString defaultPath = tab->session.isUntitled() ? QStringLiteral("未命名.md") : tab->session.filePath();
+            path = QFileDialog::getSaveFileName(this, QStringLiteral("另存为"), defaultPath, QStringLiteral("Markdown Files (*.md);;All Files (*.*)"));
+            if (path.isEmpty()) {
+                return false;
+            }
+        } else {
+            path = tab->session.filePath();
+            if (path.isEmpty()) {
+                return false;
+            }
         }
     }
 
@@ -1272,6 +1392,18 @@ bool MainWindow::saveTabAs(int index, bool interactive) {
         ~SaveGuard() { flag = false; }
     } guard(m_isSelfSaving);
 
+    bool wasUntitled = tab->session.isUntitled();
+    QString untitledId = tab->session.untitledId();
+
+    if (wasUntitled) {
+        if (!File::FileService::relocateDraftAssets(untitledId, path)) {
+            if (interactive) {
+                QMessageBox::critical(this, QStringLiteral("另存为失败"), QStringLiteral("迁移临时图片资源失败"));
+            }
+            return false;
+        }
+    }
+
     auto res = tab->session.saveAs(path, tab->view->buffer());
     if (!res.success) {
         if (interactive) {
@@ -1280,9 +1412,19 @@ bool MainWindow::saveTabAs(int index, bool interactive) {
         return false;
     }
 
+    if (wasUntitled) {
+        File::FileService::removeUntitledRecoverySnapshot(untitledId);
+        File::FileService::removeUntitledDraftAssetsDirectory(untitledId);
+        tab->view->setStagingAssetsDir(QString());
+        if (currentTabIndex() == index) {
+            Render::ImageService::instance()->setStagingAssetsDir(QString());
+        }
+    }
+
     tab->view->undoStack().setSaveCheckpoint();
     tab->view->setDocumentPath(tab->session.filePath());
     tab->suppressedExternalChangeHash.clear();
+    tab->hasPendingExternalConflict = false;
     addRecentFile(tab->session.filePath());
     updateTabTitle(index);
     updateTitle();

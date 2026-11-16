@@ -22,15 +22,22 @@ ImageService::~ImageService() = default;
 
 void ImageService::setDocumentPath(const QString &docPath) {
     QMutexLocker locker(&m_mutex);
-    if (m_documentPath != docPath) {
-        m_documentPath = docPath;
-        m_cache.clear();
-    }
+    m_documentPath = docPath;
 }
 
 QString ImageService::documentPath() const {
     QMutexLocker locker(&m_mutex);
     return m_documentPath;
+}
+
+void ImageService::setStagingAssetsDir(const QString &stagingDir) {
+    QMutexLocker locker(&m_mutex);
+    m_stagingAssetsDir = stagingDir;
+}
+
+QString ImageService::stagingAssetsDir() const {
+    QMutexLocker locker(&m_mutex);
+    return m_stagingAssetsDir;
 }
 
 void ImageService::clearCache() {
@@ -55,13 +62,22 @@ QString ImageService::resolveImagePath(const QString &rawPath) const {
     }
 
     QString docPath;
+    QString stagingDir;
     {
         QMutexLocker locker(&m_mutex);
         docPath = m_documentPath;
+        stagingDir = m_stagingAssetsDir;
     }
     if (!docPath.isEmpty()) {
         QDir docDir = QFileInfo(docPath).dir();
         QString candidate = docDir.filePath(path);
+        if (QFile::exists(candidate)) {
+            return QFileInfo(candidate).canonicalFilePath();
+        }
+    }
+    if (!stagingDir.isEmpty()) {
+        QDir sDir(stagingDir);
+        QString candidate = sDir.filePath(path);
         if (QFile::exists(candidate)) {
             return QFileInfo(candidate).canonicalFilePath();
         }

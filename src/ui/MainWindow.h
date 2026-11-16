@@ -18,10 +18,18 @@
 #include <vector>
 
 class QSettings;
+class QTabBar;
 
 namespace MarkdownTool::UI {
 
 class FindReplaceBar;
+
+class DocumentTabWidget : public QTabWidget {
+    Q_OBJECT
+public:
+    explicit DocumentTabWidget(QWidget *parent = nullptr) : QTabWidget(parent) {}
+    QTabBar *tabBar() const { return QTabWidget::tabBar(); }
+};
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -32,6 +40,7 @@ public:
         File::DocumentSession session;
         int untitledNumber = 0;
         QByteArray suppressedExternalChangeHash;
+        bool hasPendingExternalConflict = false;
     };
 
     explicit MainWindow(QWidget *parent = nullptr);
@@ -40,16 +49,18 @@ public:
     bool openFile(const QString &filePath);
     bool openFile(const QString &filePath, bool interactive);
     bool saveFile(bool interactive = true, bool forceOverwrite = false);
-    bool saveFileAs(bool interactive = true);
+    bool saveFileAs(const QString &targetPath = QString(), bool interactive = true);
     bool reloadCurrentFile();
     void handleExternalFileModification(bool interactive = true);
     void handleAllExternalFileModifications(bool interactive = true);
     bool checkUntitledRecoverySnapshot(bool interactive = true);
 
     // Multi-Document Tab Management
-    QTabWidget *tabWidget() const { return m_tabWidget; }
+    DocumentTabWidget *tabWidget() const { return m_tabWidget; }
     int tabCount() const { return static_cast<int>(m_tabs.size()); }
     int currentTabIndex() const;
+    TabInfo *currentTabInfo() const;
+    TabInfo *tabInfoAt(int index) const;
     int createTab(const QString &filePath = QString(), bool makeCurrent = true, bool interactive = true);
     bool closeTab(int index, bool interactive = true);
     bool closeCurrentTab(bool interactive = true);
@@ -58,7 +69,7 @@ public:
     void nextTab();
     void prevTab();
     bool saveTab(int index, bool interactive = true, bool forceOverwrite = false);
-    bool saveTabAs(int index, bool interactive = true);
+    bool saveTabAs(int index, const QString &targetPath = QString(), bool interactive = true);
     bool reloadTab(int index);
 
     void loadPreferences(QSettings *settings = nullptr);
@@ -101,6 +112,7 @@ private slots:
     void onRecoveryTimer();
     void onExternalFileChanged(const QString &path);
     void onCurrentTabChanged(int index);
+    void onTabMoved(int from, int to);
 
 private:
     void setupUi();
@@ -110,8 +122,6 @@ private:
     void updateFileWatcher();
     void updateFileWatcher(const QString &newPath);
 
-    TabInfo *currentTabInfo() const;
-    TabInfo *tabInfoAt(int index) const;
     int findTabIndexByPath(const QString &path) const;
     void updateTabTitle(int index);
     void setupEditorViewConnections(Editor::NativeEditorView *view);
@@ -121,7 +131,7 @@ private:
     Editor::NativeEditorView *m_editorView = nullptr;
     FindReplaceBar *m_findBar = nullptr;
     QSplitter *m_splitter = nullptr;
-    QTabWidget *m_tabWidget = nullptr;
+    DocumentTabWidget *m_tabWidget = nullptr;
     std::vector<std::unique_ptr<TabInfo>> m_tabs;
     int m_nextUntitledNumber = 1;
 

@@ -422,6 +422,52 @@ QStatusBar::item {
     border: none;
 }
 
+/* Document Tab Bar */
+QTabWidget::pane {
+    border: none;
+    background-color: %8;
+}
+
+QTabBar {
+    background-color: %2;
+    border-bottom: 1px solid %3;
+    qproperty-drawBase: 0;
+}
+
+QTabBar::tab {
+    background-color: transparent;
+    color: %7;
+    border: none;
+    border-right: 1px solid %3;
+    padding: 6px 14px;
+    min-height: 22px;
+    font-size: 12.5px;
+}
+
+QTabBar::tab:hover {
+    background-color: %4;
+    color: %1;
+}
+
+QTabBar::tab:selected {
+    background-color: %8;
+    color: %1;
+    font-weight: 500;
+    border-top: 2px solid %6;
+}
+
+QTabBar::close-button {
+    image: none;
+    subcontrol-position: right;
+    margin-left: 4px;
+    padding: 2px;
+    border-radius: 3px;
+}
+
+QTabBar::close-button:hover {
+    background-color: %4;
+}
+
 /* Splitter */
 QSplitter::handle {
     background-color: %3;

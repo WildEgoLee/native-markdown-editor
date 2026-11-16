@@ -117,6 +117,7 @@ private slots:
     void testUntitledDocumentCrashRecoverySnapshot();
     void testExternalFileModificationWatcher();
     void testInPlaceImageRenderingAndPaste();
+    void testMultiDocumentTabsAndSwitching();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempSettingsDir;
@@ -5377,6 +5378,100 @@ void TestProbes::testInPlaceImageRenderingAndPaste() {
     QImage loadedSaved(assetFullPath);
     QVERIFY(!loadedSaved.isNull());
     QCOMPARE(loadedSaved.size(), QSize(80, 50));
+}
+
+void TestProbes::testMultiDocumentTabsAndSwitching() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString doc1Path = tempDir.filePath(QStringLiteral("doc1.md"));
+    QString doc2Path = tempDir.filePath(QStringLiteral("doc2.md"));
+
+    {
+        QFile f1(doc1Path);
+        QVERIFY(f1.open(QIODevice::WriteOnly));
+        f1.write("# 文档一内容\n");
+    }
+    {
+        QFile f2(doc2Path);
+        QVERIFY(f2.open(QIODevice::WriteOnly));
+        f2.write("# 文档二内容\n");
+    }
+
+    // 1. Initial window state
+    UI::MainWindow win;
+    QCOMPARE(win.tabCount(), 1);
+    QCOMPARE(win.currentTabIndex(), 0);
+    QVERIFY(win.editorView() != nullptr);
+    QVERIFY(win.tabWidget() != nullptr);
+    QVERIFY(win.session().isUntitled());
+
+    // 2. Reusing empty untitled tab on first open
+    bool ok1 = win.openFile(doc1Path, false);
+    QVERIFY(ok1);
+    QCOMPARE(win.tabCount(), 1);
+    QCOMPARE(win.currentTabIndex(), 0);
+    QCOMPARE(win.session().filePath(), doc1Path);
+    QCOMPARE(win.editorView()->buffer().text(), QStringLiteral("# 文档一内容\n"));
+
+    // 3. Opening second document creates new tab
+    bool ok2 = win.openFile(doc2Path, false);
+    QVERIFY(ok2);
+    QCOMPARE(win.tabCount(), 2);
+    QCOMPARE(win.currentTabIndex(), 1);
+    QCOMPARE(win.session().filePath(), doc2Path);
+    QCOMPARE(win.editorView()->buffer().text(), QStringLiteral("# 文档二内容\n"));
+
+    // 4. Re-opening existing file activates its tab without creating duplicate
+    bool okReopen = win.openFile(doc1Path, false);
+    QVERIFY(okReopen);
+    QCOMPARE(win.tabCount(), 2);
+    QCOMPARE(win.currentTabIndex(), 0);
+    QCOMPARE(win.session().filePath(), doc1Path);
+
+    // 5. Independent buffer, cursor & undo states
+    win.editorView()->setCursorPos(win.editorView()->buffer().length());
+    win.editorView()->buffer().replace(win.editorView()->buffer().length(), 0, QStringLiteral("追加修改"));
+    win.editorView()->undoStack().markDirty();
+    QVERIFY(win.editorView()->undoStack().isDirty());
+    QVERIFY(win.tabWidget()->tabText(0).contains(QStringLiteral("●")));
+
+    // Switch to tab 1
+    win.switchToTab(1);
+    QCOMPARE(win.currentTabIndex(), 1);
+    QCOMPARE(win.session().filePath(), doc2Path);
+    QVERIFY(!win.editorView()->undoStack().isDirty());
+    QVERIFY(!win.tabWidget()->tabText(1).contains(QStringLiteral("●")));
+
+    // Switch back to tab 0
+    win.switchToTab(0);
+    QCOMPARE(win.currentTabIndex(), 0);
+    QVERIFY(win.editorView()->undoStack().isDirty());
+    QVERIFY(win.editorView()->buffer().text().contains(QStringLiteral("追加修改")));
+
+    // 6. New untitled tab
+    win.newFile();
+    QCOMPARE(win.tabCount(), 3);
+    QCOMPARE(win.currentTabIndex(), 2);
+    QVERIFY(win.session().isUntitled());
+    QVERIFY(win.editorView()->buffer().isEmpty());
+
+    // 7. Tab navigation (next / prev)
+    win.nextTab();
+    QCOMPARE(win.currentTabIndex(), 0);
+    win.prevTab();
+    QCOMPARE(win.currentTabIndex(), 2);
+
+    // 8. Closing tabs
+    win.closeCurrentTab(false); // Close tab 2
+    QCOMPARE(win.tabCount(), 2);
+
+    win.closeTab(1, false); // Close tab 1
+    QCOMPARE(win.tabCount(), 1);
+    QCOMPARE(win.session().filePath(), doc1Path);
+
+    win.closeCurrentTab(false); // Close remaining tab
+    QCOMPARE(win.tabCount(), 1); // Automatically resets to clean untitled tab
+    QVERIFY(win.session().isUntitled());
 }
 
 QTEST_MAIN(TestProbes)

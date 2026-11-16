@@ -531,6 +531,8 @@ void MainWindow::onTabMoved(int from, int to) {
     auto item = std::move(m_tabs[from]);
     m_tabs.erase(m_tabs.begin() + from);
     m_tabs.insert(m_tabs.begin() + to, std::move(item));
+
+    onCurrentTabChanged(m_tabWidget->currentIndex());
 }
 
 void MainWindow::setupEditorViewConnections(Editor::NativeEditorView *view) {
@@ -795,7 +797,11 @@ bool MainWindow::closeAllTabs(bool interactive) {
 
 void MainWindow::switchToTab(int index) {
     if (index >= 0 && index < m_tabs.size() && m_tabWidget) {
-        m_tabWidget->setCurrentIndex(index);
+        if (m_tabWidget->currentIndex() == index) {
+            onCurrentTabChanged(index);
+        } else {
+            m_tabWidget->setCurrentIndex(index);
+        }
     }
 }
 
@@ -986,7 +992,11 @@ bool MainWindow::checkUntitledRecoverySnapshot(bool interactive) {
             QMessageBox::Yes | QMessageBox::No);
         if (btn != QMessageBox::Yes) {
             for (const auto &p : snapshots) {
+                QString uid = File::FileService::extractUntitledIdFromSnapshotPath(p);
                 QFile::remove(p);
+                if (!uid.isEmpty()) {
+                    File::FileService::removeUntitledDraftAssetsDirectory(uid);
+                }
             }
             return false;
         }
@@ -995,6 +1005,8 @@ bool MainWindow::checkUntitledRecoverySnapshot(bool interactive) {
     int restoredCount = 0;
     for (int i = 0; i < snapshots.size(); ++i) {
         const QString &recPath = snapshots[i];
+        QString originalId = File::FileService::extractUntitledIdFromSnapshotPath(recPath);
+
         int targetTabIdx = -1;
         if (i == 0 && m_tabWidget->count() == 1) {
             TabInfo *firstTab = tabInfoAt(0);
@@ -1012,9 +1024,12 @@ bool MainWindow::checkUntitledRecoverySnapshot(bool interactive) {
             if (tab) {
                 QString err;
                 if (File::FileService::loadFile(recPath, tab->view->buffer(), err)) {
+                    if (!originalId.isEmpty()) {
+                        tab->session.setUntitledId(originalId);
+                        tab->view->setStagingAssetsDir(File::FileService::untitledDraftAssetsDirectory(originalId));
+                    }
                     tab->view->undoStack().clear(true);
                     updateTabTitle(targetTabIdx);
-                    QFile::remove(recPath);
                     restoredCount++;
                 }
             }
@@ -1394,11 +1409,12 @@ bool MainWindow::saveTabAs(int index, const QString &targetPath, bool interactiv
 
     bool wasUntitled = tab->session.isUntitled();
     QString untitledId = tab->session.untitledId();
+    File::AssetRelocationTransaction assetTx;
 
     if (wasUntitled) {
-        if (!File::FileService::relocateDraftAssets(untitledId, path)) {
+        if (!assetTx.prepare(untitledId, path)) {
             if (interactive) {
-                QMessageBox::critical(this, QStringLiteral("另存为失败"), QStringLiteral("迁移临时图片资源失败"));
+                QMessageBox::critical(this, QStringLiteral("另存为失败"), QStringLiteral("迁移临时图片资源失败，操作已回滚。"));
             }
             return false;
         }
@@ -1406,6 +1422,9 @@ bool MainWindow::saveTabAs(int index, const QString &targetPath, bool interactiv
 
     auto res = tab->session.saveAs(path, tab->view->buffer());
     if (!res.success) {
+        if (wasUntitled) {
+            assetTx.rollback();
+        }
         if (interactive) {
             QMessageBox::critical(this, QStringLiteral("另存为失败"), res.errorMessage);
         }
@@ -1413,8 +1432,8 @@ bool MainWindow::saveTabAs(int index, const QString &targetPath, bool interactiv
     }
 
     if (wasUntitled) {
+        assetTx.commit();
         File::FileService::removeUntitledRecoverySnapshot(untitledId);
-        File::FileService::removeUntitledDraftAssetsDirectory(untitledId);
         tab->view->setStagingAssetsDir(QString());
         if (currentTabIndex() == index) {
             Render::ImageService::instance()->setStagingAssetsDir(QString());

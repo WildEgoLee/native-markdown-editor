@@ -125,6 +125,8 @@ private slots:
     void testUntitledImagePasteSaveAsRelocatesAssets();
     void testMultipleUntitledDraftsRecovery();
     void testCancelledWindowClosePreservesRecoverySnapshots();
+    void testAssetRelocationRollbackOnExistingConflict();
+    void testDraftRecoveryPreservesUUIDAndAssets();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempSettingsDir;
@@ -5637,18 +5639,26 @@ void TestProbes::testMultipleUntitledDraftsRecovery() {
     QCOMPARE(win.tabCount(), 3);
 
     QStringList restoredTexts;
+    QStringList restoredIds;
     for (int i = 0; i < win.tabCount(); ++i) {
         restoredTexts.append(win.tabInfoAt(i)->view->buffer().text());
+        restoredIds.append(win.tabInfoAt(i)->session.untitledId());
         QVERIFY(win.tabInfoAt(i)->session.isUntitled());
         QVERIFY(win.tabInfoAt(i)->view->undoStack().isDirty());
     }
     QVERIFY(restoredTexts.contains(QStringLiteral("草稿一内容")));
     QVERIFY(restoredTexts.contains(QStringLiteral("草稿二内容")));
     QVERIFY(restoredTexts.contains(QStringLiteral("草稿三内容")));
+    QVERIFY(restoredIds.contains(id1));
+    QVERIFY(restoredIds.contains(id2));
+    QVERIFY(restoredIds.contains(id3));
 
-    // 4. Verify snapshot files were cleaned up from disk
-    auto remaining = File::FileService::findUntitledRecoverySnapshots();
-    QVERIFY(remaining.isEmpty());
+    // Snapshots remain active while session is editing (crash durability)
+    QCOMPARE(File::FileService::findUntitledRecoverySnapshots().size(), 3);
+
+    // Closing the tabs removes snapshots
+    QVERIFY(win.closeAllTabs(false));
+    QVERIFY(File::FileService::findUntitledRecoverySnapshots().isEmpty());
 }
 
 void TestProbes::testCancelledWindowClosePreservesRecoverySnapshots() {
@@ -5708,6 +5718,115 @@ void TestProbes::testCancelledWindowClosePreservesRecoverySnapshots() {
     // Both snapshots are safely cleaned up after full confirmed close
     QVERIFY(File::FileService::findRecoverySnapshot(doc1Path).isEmpty());
     QVERIFY(File::FileService::findUntitledRecoverySnapshot(untitledId).isEmpty());
+}
+
+void TestProbes::testAssetRelocationRollbackOnExistingConflict() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString targetDocPath = tempDir.filePath(QStringLiteral("doc_with_asset.md"));
+    QDir targetAssetsDir(tempDir.filePath(QStringLiteral("assets")));
+    QVERIFY(targetAssetsDir.mkpath(QStringLiteral(".")));
+
+    QString existingAssetPath = targetAssetsDir.filePath(QStringLiteral("conflict_image.png"));
+    {
+        QFile f(existingAssetPath);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("OLD_IMAGE_DATA_DO_NOT_DESTROY");
+    }
+
+    QString testDraftId = QStringLiteral("draft-rollback-test-01");
+    QString draftAssetsPath = File::FileService::untitledDraftAssetsDirectory(testDraftId) + QStringLiteral("/assets");
+    QDir().mkpath(draftAssetsPath);
+    QString draftImageFile = QDir(draftAssetsPath).filePath(QStringLiteral("conflict_image.png"));
+    {
+        QFile f(draftImageFile);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("NEW_IMAGE_DATA_FROM_PASTE");
+    }
+
+    // 1. Transaction test: Prepare relocation
+    File::AssetRelocationTransaction tx;
+    bool prepared = tx.prepare(testDraftId, targetDocPath);
+    QVERIFY(prepared);
+
+    // In prepared state: new image is at destination, but backup exists
+    {
+        QFile f(existingAssetPath);
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        QCOMPARE(f.readAll(), QByteArray("NEW_IMAGE_DATA_FROM_PASTE"));
+    }
+
+    // 2. Simulate SaveAs failure -> Trigger Rollback
+    tx.rollback();
+
+    // After rollback: old existing image MUST be restored byte-for-byte!
+    {
+        QFile f(existingAssetPath);
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        QCOMPARE(f.readAll(), QByteArray("OLD_IMAGE_DATA_DO_NOT_DESTROY"));
+    }
+    // Staging image must still be intact
+    QVERIFY(QFile::exists(draftImageFile));
+
+    // 3. Retry and Commit
+    File::AssetRelocationTransaction tx2;
+    QVERIFY(tx2.prepare(testDraftId, targetDocPath));
+    tx2.commit();
+
+    // After commit: new image in place, staging folder cleaned up
+    {
+        QFile f(existingAssetPath);
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        QCOMPARE(f.readAll(), QByteArray("NEW_IMAGE_DATA_FROM_PASTE"));
+    }
+    QVERIFY(!QFile::exists(draftImageFile));
+}
+
+void TestProbes::testDraftRecoveryPreservesUUIDAndAssets() {
+    QString testDraftId = QStringLiteral("preserved-draft-uuid-1234");
+    QString draftAssetsPath = File::FileService::untitledDraftAssetsDirectory(testDraftId) + QStringLiteral("/assets");
+    QDir().mkpath(draftAssetsPath);
+    QString draftImageFile = QDir(draftAssetsPath).filePath(QStringLiteral("preserved_photo.png"));
+    {
+        QImage img(48, 48, QImage::Format_RGB32);
+        img.fill(Qt::magenta);
+        QVERIFY(img.save(draftImageFile, "PNG"));
+    }
+
+    Core::TextBuffer draftBuffer;
+    draftBuffer.insert(0, QStringLiteral("# 崩溃前草稿\n![photo](assets/preserved_photo.png)\n"));
+    QVERIFY(File::FileService::writeUntitledRecoverySnapshot(testDraftId, draftBuffer));
+
+    // Recovery in MainWindow
+    UI::MainWindow win;
+    bool recovered = win.checkUntitledRecoverySnapshot(false);
+    QVERIFY(recovered);
+
+    // Verify original UUID was preserved
+    QCOMPARE(win.session().untitledId(), testDraftId);
+    QCOMPARE(win.tabInfoAt(0)->view->stagingAssetsDir(), File::FileService::untitledDraftAssetsDirectory(testDraftId));
+
+    // Verify ImageService resolves image path from preserved draft assets
+    QString resolved = Render::ImageService::instance()->resolveImagePath(QStringLiteral("assets/preserved_photo.png"));
+    QVERIFY2(QFile::exists(resolved), qPrintable(resolved));
+    QCOMPARE(QFileInfo(resolved).canonicalFilePath(), QFileInfo(draftImageFile).canonicalFilePath());
+
+    // Verify recovery snapshot file was NOT prematurely deleted (durability guarantee)
+    QVERIFY(!File::FileService::findUntitledRecoverySnapshot(testDraftId).isEmpty());
+
+    // Save as to permanent file
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString permDocPath = tempDir.filePath(QStringLiteral("permanent_note.md"));
+    QVERIFY(win.saveTabAs(0, permDocPath, false));
+
+    // Relocated photo exists
+    QString relocatedPhoto = tempDir.filePath(QStringLiteral("assets/preserved_photo.png"));
+    QVERIFY2(QFile::exists(relocatedPhoto), qPrintable(relocatedPhoto));
+
+    // Staging and snapshot cleaned up after confirmed save
+    QVERIFY(File::FileService::findUntitledRecoverySnapshot(testDraftId).isEmpty());
+    QVERIFY(!QFile::exists(draftImageFile));
 }
 
 QTEST_MAIN(TestProbes)

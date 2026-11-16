@@ -34,11 +34,42 @@ public:
     static void removeUntitledRecoverySnapshot(const QString &untitledId);
     static QString findUntitledRecoverySnapshot(const QString &untitledId);
     static QStringList findUntitledRecoverySnapshots();
+    static QString extractUntitledIdFromSnapshotPath(const QString &snapshotPath);
 
     // Untitled document draft assets support
     static QString untitledDraftAssetsDirectory(const QString &untitledId);
     static void removeUntitledDraftAssetsDirectory(const QString &untitledId);
     static bool relocateDraftAssets(const QString &untitledId, const QString &targetDocumentPath);
+};
+
+struct RelocationBackupItem {
+    QString originalPath;
+    QString backupPath;
+};
+
+struct RelocationTransferredItem {
+    QString finalPath;
+};
+
+class AssetRelocationTransaction {
+public:
+    AssetRelocationTransaction() = default;
+    ~AssetRelocationTransaction() {
+        if (!m_committed) {
+            rollback();
+        }
+    }
+
+    bool prepare(const QString &untitledId, const QString &targetDocumentPath);
+    void commit();
+    void rollback();
+    bool hasAssets() const { return !m_transferred.isEmpty(); }
+
+private:
+    QString m_untitledId;
+    QList<RelocationBackupItem> m_backups;
+    QList<RelocationTransferredItem> m_transferred;
+    bool m_committed = false;
 };
 
 } // namespace MarkdownTool::File

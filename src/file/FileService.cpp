@@ -14,8 +14,21 @@
 namespace MarkdownTool::File {
 
 QByteArray FileService::calculateFileHash(const QString &filePath) {
+    if (filePath.isEmpty() || !QFile::exists(filePath)) {
+        return QByteArray();
+    }
     QFile file(filePath);
-    if (!file.open(QIODevice::ReadOnly)) {
+    bool opened = false;
+    for (int retry = 0; retry < 15; ++retry) {
+        if (file.open(QIODevice::ReadOnly)) {
+            opened = true;
+            break;
+        }
+#ifdef Q_OS_WIN
+        Sleep(10);
+#endif
+    }
+    if (!opened) {
         return QByteArray();
     }
     QCryptographicHash hash(QCryptographicHash::Sha256);
@@ -98,9 +111,40 @@ SaveResult FileService::safeSaveFile(const QString &filePath, const Core::TextBu
 #ifdef Q_OS_WIN
     std::wstring wTemp = tempFilePath.toStdWString();
     std::wstring wTarget = filePath.toStdWString();
-    BOOL ok = MoveFileExW(wTemp.c_str(), wTarget.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+
+    if (QFile::exists(filePath)) {
+        SetFileAttributesW(wTarget.c_str(), FILE_ATTRIBUTE_NORMAL);
+    }
+
+    BOOL ok = FALSE;
+    DWORD err = 0;
+    // Retry up to 30 times with 10ms backoff (~300ms total) to overcome transient locks from
+    // Windows Defender, Windows Search Indexer, or active QFileSystemWatcher on CI runners.
+    for (int retry = 0; retry < 30; ++retry) {
+        ok = MoveFileExW(wTemp.c_str(), wTarget.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+        if (ok) {
+            break;
+        }
+        err = GetLastError();
+        if (err != ERROR_SHARING_VIOLATION && err != ERROR_ACCESS_DENIED) {
+            break;
+        }
+        Sleep(10);
+    }
+
+    // Fallback: If MoveFileExW still failed with access/sharing violation, try ReplaceFileW
+    if (!ok && (err == ERROR_SHARING_VIOLATION || err == ERROR_ACCESS_DENIED)) {
+        for (int retry = 0; retry < 10; ++retry) {
+            if (ReplaceFileW(wTarget.c_str(), wTemp.c_str(), nullptr, REPLACEFILE_IGNORE_MERGE_ERRORS, nullptr, nullptr)) {
+                ok = TRUE;
+                break;
+            }
+            err = GetLastError();
+            Sleep(10);
+        }
+    }
+
     if (!ok) {
-        DWORD err = GetLastError();
         tempFile.remove();
         res.success = false;
         res.errorMessage = QStringLiteral("MoveFileExW failed with Windows error code: ") + QString::number(err);
@@ -305,11 +349,25 @@ void FileService::removeUntitledDraftAssetsDirectory(const QString &untitledId) 
     }
 }
 
-bool FileService::relocateDraftAssets(const QString &untitledId, const QString &targetDocumentPath) {
+QString FileService::extractUntitledIdFromSnapshotPath(const QString &snapshotPath) {
+    QFileInfo fi(snapshotPath);
+    QString name = fi.fileName();
+    if (name.startsWith(QStringLiteral("rec_untitled_")) && name.endsWith(QStringLiteral(".md"))) {
+        return name.mid(13, name.length() - 16);
+    }
+    return QString();
+}
+
+bool AssetRelocationTransaction::prepare(const QString &untitledId, const QString &targetDocumentPath) {
+    rollback();
+    m_untitledId = untitledId;
+    m_committed = false;
+
     if (untitledId.isEmpty() || targetDocumentPath.isEmpty()) {
         return false;
     }
-    QString recDir = recoveryDirectory();
+
+    QString recDir = FileService::recoveryDirectory();
     QDir draftAssetsDir(recDir + QStringLiteral("/draft_assets/") + untitledId + QStringLiteral("/assets"));
     if (!draftAssetsDir.exists()) {
         return true; // Nothing to relocate
@@ -325,12 +383,81 @@ bool FileService::relocateDraftAssets(const QString &untitledId, const QString &
     for (const auto &fi : files) {
         QString destFile = QDir(targetAssetsPath).filePath(fi.fileName());
         if (QFile::exists(destFile)) {
-            QFile::remove(destFile);
+            QString backupName = QStringLiteral(".bak_%1_%2").arg(QRandomGenerator::global()->generate()).arg(fi.fileName());
+            QString backupPath = QDir(targetAssetsPath).filePath(backupName);
+            if (QFile::exists(backupPath)) {
+                QFile::remove(backupPath);
+            }
+            if (!QFile::rename(destFile, backupPath)) {
+                rollback();
+                return false;
+            }
+            m_backups.append({destFile, backupPath});
         }
+
         if (!QFile::copy(fi.absoluteFilePath(), destFile)) {
+            rollback();
             return false;
         }
+        m_transferred.append({destFile});
     }
+
+    return true;
+}
+
+void AssetRelocationTransaction::rollback() {
+    if (m_committed) {
+        return;
+    }
+
+    // 1. Remove all newly copied destination files
+    for (const auto &item : m_transferred) {
+        if (QFile::exists(item.finalPath)) {
+            QFile::remove(item.finalPath);
+        }
+    }
+    m_transferred.clear();
+
+    // 2. Restore all pre-existing destination backups
+    for (const auto &item : m_backups) {
+        if (QFile::exists(item.backupPath)) {
+            if (QFile::exists(item.originalPath)) {
+                QFile::remove(item.originalPath);
+            }
+            QFile::rename(item.backupPath, item.originalPath);
+        }
+    }
+    m_backups.clear();
+}
+
+void AssetRelocationTransaction::commit() {
+    if (m_committed) {
+        return;
+    }
+
+    // 1. Remove backup files
+    for (const auto &item : m_backups) {
+        if (QFile::exists(item.backupPath)) {
+            QFile::remove(item.backupPath);
+        }
+    }
+    m_backups.clear();
+    m_transferred.clear();
+
+    // 2. Clean up draft assets folder
+    if (!m_untitledId.isEmpty()) {
+        FileService::removeUntitledDraftAssetsDirectory(m_untitledId);
+    }
+
+    m_committed = true;
+}
+
+bool FileService::relocateDraftAssets(const QString &untitledId, const QString &targetDocumentPath) {
+    AssetRelocationTransaction tx;
+    if (!tx.prepare(untitledId, targetDocumentPath)) {
+        return false;
+    }
+    tx.commit();
     return true;
 }
 

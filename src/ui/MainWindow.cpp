@@ -33,6 +33,16 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_recoveryTimer, &QTimer::timeout, this, &MainWindow::onRecoveryTimer);
     m_recoveryTimer->start();
 
+    m_fileWatcher = new QFileSystemWatcher(this);
+    connect(m_fileWatcher, &QFileSystemWatcher::fileChanged, this, &MainWindow::onExternalFileChanged);
+
+    m_externalChangeDebounceTimer = new QTimer(this);
+    m_externalChangeDebounceTimer->setSingleShot(true);
+    m_externalChangeDebounceTimer->setInterval(200);
+    connect(m_externalChangeDebounceTimer, &QTimer::timeout, this, [this]() {
+        handleExternalFileModification(true);
+    });
+
     updateTitle();
     updateThemeStyles();
     connect(&Theme::ThemeManager::instance(), &Theme::ThemeManager::themeChanged, this, &MainWindow::updateThemeStyles);
@@ -178,8 +188,8 @@ void MainWindow::setupMenusAndToolbars() {
     connect(m_recentMenu, &QMenu::aboutToShow, this, &MainWindow::updateRecentFilesMenu);
     updateRecentFilesMenu();
     fileMenu->addSeparator();
-    fileMenu->addAction(QStringLiteral("保存 (&S)"), QKeySequence::Save, this, &MainWindow::saveFile);
-    fileMenu->addAction(QStringLiteral("另存为 (&A)..."), QKeySequence::SaveAs, this, &MainWindow::saveFileAs);
+    fileMenu->addAction(QStringLiteral("保存 (&S)"), QKeySequence::Save, this, [this]() { saveFile(); });
+    fileMenu->addAction(QStringLiteral("另存为 (&A)..."), QKeySequence::SaveAs, this, [this]() { saveFileAs(); });
     fileMenu->addSeparator();
     fileMenu->addAction(QStringLiteral("退出 (&X)"), QKeySequence::Quit, this, &MainWindow::close);
 
@@ -365,7 +375,7 @@ void MainWindow::setupMenusAndToolbars() {
 
     m_tbSave = tb->addAction(Theme::ThemeManager::instance().icon(QStringLiteral("save"), 18), QStringLiteral("保存 (Ctrl+S)"));
     m_tbSave->setToolTip(QStringLiteral("保存文档 (Ctrl+S)"));
-    connect(m_tbSave, &QAction::triggered, this, &MainWindow::saveFile);
+    connect(m_tbSave, &QAction::triggered, this, [this]() { saveFile(); });
 
     tb->addSeparator();
 
@@ -580,15 +590,153 @@ void MainWindow::updateRecentFilesMenu() {
 }
 
 void MainWindow::onRecoveryTimer() {
-    if (!m_session.isUntitled() && m_editorView && m_editorView->undoStack().isDirty()) {
+    if (!m_editorView || !m_editorView->undoStack().isDirty()) {
+        return;
+    }
+    if (m_session.isUntitled()) {
+        if (!m_editorView->buffer().isEmpty()) {
+            File::FileService::writeUntitledRecoverySnapshot(m_session.untitledId(), m_editorView->buffer());
+        }
+    } else {
         File::FileService::writeRecoverySnapshot(m_session.filePath(), m_editorView->buffer());
     }
+}
+
+bool MainWindow::checkUntitledRecoverySnapshot(bool interactive) {
+    if (!m_session.isUntitled() || !m_editorView->buffer().isEmpty()) {
+        return false;
+    }
+    auto snapshots = File::FileService::findUntitledRecoverySnapshots();
+    if (snapshots.isEmpty()) {
+        return false;
+    }
+    QString recPath = snapshots.first();
+    if (interactive) {
+        auto btn = QMessageBox::question(
+            this,
+            QStringLiteral("发现未命名文档恢复草稿"),
+            QStringLiteral("检测到上次运行遗留了未保存的未命名文档草稿，是否恢复？"),
+            QMessageBox::Yes | QMessageBox::No);
+        if (btn == QMessageBox::Yes) {
+            QString err;
+            if (File::FileService::loadFile(recPath, m_editorView->buffer(), err)) {
+                m_editorView->undoStack().clear(true);
+                updateTitle();
+                QFile::remove(recPath);
+                return true;
+            } else {
+                QMessageBox::warning(this, QStringLiteral("恢复失败"), QStringLiteral("无法加载恢复草稿: ") + err);
+            }
+        } else {
+            for (const auto &p : snapshots) {
+                QFile::remove(p);
+            }
+        }
+    } else {
+        QString err;
+        if (File::FileService::loadFile(recPath, m_editorView->buffer(), err)) {
+            m_editorView->undoStack().clear(true);
+            updateTitle();
+            QFile::remove(recPath);
+            return true;
+        }
+    }
+    return false;
+}
+
+void MainWindow::updateFileWatcher(const QString &newPath) {
+    if (!m_fileWatcher) {
+        return;
+    }
+    const QStringList watched = m_fileWatcher->files();
+    if (!watched.isEmpty()) {
+        m_fileWatcher->removePaths(watched);
+    }
+    if (!newPath.isEmpty() && QFile::exists(newPath)) {
+        m_fileWatcher->addPath(newPath);
+    }
+}
+
+void MainWindow::onExternalFileChanged(const QString &path) {
+    if (m_isSelfSaving) {
+        return;
+    }
+    if (path.isEmpty() || path != m_session.filePath()) {
+        return;
+    }
+    // Windows file watchers sometimes drop the path if replaced atomically
+    if (QFile::exists(path) && !m_fileWatcher->files().contains(path)) {
+        m_fileWatcher->addPath(path);
+    }
+    m_externalChangeDebounceTimer->start(200);
+}
+
+void MainWindow::handleExternalFileModification(bool interactive) {
+    const QString filePath = m_session.filePath();
+    if (filePath.isEmpty() || m_session.isUntitled()) {
+        return;
+    }
+    if (!QFile::exists(filePath)) {
+        return;
+    }
+
+    if (!File::FileService::hasExternalModification(filePath, m_session.lastKnownHash())) {
+        return;
+    }
+
+    QByteArray currentHash = File::FileService::calculateFileHash(filePath);
+    if (!m_suppressedExternalChangeHash.isEmpty() && currentHash == m_suppressedExternalChangeHash) {
+        return;
+    }
+
+    if (!m_editorView->undoStack().isDirty()) {
+        // Clean state: Auto-reload smoothly
+        reloadCurrentFile();
+        if (statusBar()) {
+            statusBar()->showMessage(QStringLiteral("检测到外部文件已更新，已自动重新加载"), 3000);
+        }
+    } else {
+        // Dirty state: Local unsaved edits exist!
+        if (interactive) {
+            auto btn = QMessageBox::warning(
+                this,
+                QStringLiteral("外部修改冲突"),
+                QStringLiteral("文件 \"%1\" 已在外部被其他程序修改。\n\n"
+                               "是否重新从磁盘加载？\n"
+                               "（注意：重新加载将丢失当前编辑器中未保存的修改）")
+                    .arg(QFileInfo(filePath).fileName()),
+                QMessageBox::Yes | QMessageBox::No);
+            if (btn == QMessageBox::Yes) {
+                reloadCurrentFile();
+            } else {
+                m_suppressedExternalChangeHash = currentHash;
+            }
+        }
+    }
+}
+
+bool MainWindow::reloadCurrentFile() {
+    if (m_session.isUntitled() || m_session.filePath().isEmpty()) {
+        return false;
+    }
+    QString err;
+    if (!m_session.load(m_session.filePath(), m_editorView->buffer(), err)) {
+        return false;
+    }
+    m_editorView->undoStack().clear();
+    m_editorView->undoStack().setSaveCheckpoint();
+    m_suppressedExternalChangeHash.clear();
+    updateTitle();
+    updateFileWatcher(m_session.filePath());
+    return true;
 }
 
 void MainWindow::newFile() {
     if (!maybeSave()) {
         return;
     }
+    updateFileWatcher(QString());
+    m_suppressedExternalChangeHash.clear();
     m_session.resetToUntitled(m_editorView->buffer());
     m_editorView->undoStack().clear();
     m_editorView->undoStack().setSaveCheckpoint();
@@ -639,6 +787,8 @@ bool MainWindow::openFile(const QString &filePath, bool interactive) {
                 // Initialize session to target file and baseline hash, without overwriting recovered buffer
                 m_session.attachFile(filePath);
                 addRecentFile(filePath);
+                updateFileWatcher(filePath);
+                m_suppressedExternalChangeHash.clear();
                 // Mark document as dirty so user is prompted to save, retaining snapshot until successful save
                 m_editorView->undoStack().clear(true);
                 updateTitle();
@@ -663,65 +813,99 @@ bool MainWindow::openFile(const QString &filePath, bool interactive) {
     m_editorView->undoStack().clear();
     m_editorView->undoStack().setSaveCheckpoint();
     addRecentFile(filePath);
+    updateFileWatcher(filePath);
+    m_suppressedExternalChangeHash.clear();
     updateTitle();
     return true;
 }
 
-bool MainWindow::saveFile() {
+bool MainWindow::saveFile(bool interactive, bool forceOverwrite) {
     if (m_session.isUntitled()) {
-        return saveFileAs();
+        return saveFileAs(interactive);
     }
 
-    auto res = m_session.save(m_editorView->buffer());
+    struct SaveGuard {
+        bool &flag;
+        SaveGuard(bool &f) : flag(f) { flag = true; }
+        ~SaveGuard() { flag = false; }
+    } guard(m_isSelfSaving);
+
+    auto res = m_session.save(m_editorView->buffer(), forceOverwrite);
     if (!res.success) {
         if (res.hadConflict) {
-            auto btn = QMessageBox::warning(this,
-                                            QStringLiteral("外部修改冲突"),
-                                            QStringLiteral("该文件已在外部被其他程序修改！\n是否强制覆盖外部修改？"),
-                                            QMessageBox::Yes | QMessageBox::No);
-            if (btn == QMessageBox::Yes) {
-                // Force overwrite
-                auto forceRes = m_session.save(m_editorView->buffer(), true);
-                if (forceRes.success) {
-                    m_editorView->undoStack().setSaveCheckpoint();
-                    addRecentFile(m_session.filePath());
-                    updateTitle();
-                    return true;
-                } else {
-                    QMessageBox::critical(this, QStringLiteral("保存失败"), forceRes.errorMessage);
-                    return false;
+            if (interactive) {
+                auto btn = QMessageBox::warning(this,
+                                                QStringLiteral("外部修改冲突"),
+                                                QStringLiteral("该文件已在外部被其他程序修改！\n是否强制覆盖外部修改？"),
+                                                QMessageBox::Yes | QMessageBox::No);
+                if (btn == QMessageBox::Yes) {
+                    // Force overwrite
+                    auto forceRes = m_session.save(m_editorView->buffer(), true);
+                    if (forceRes.success) {
+                        m_editorView->undoStack().setSaveCheckpoint();
+                        m_suppressedExternalChangeHash.clear();
+                        addRecentFile(m_session.filePath());
+                        updateTitle();
+                        updateFileWatcher(m_session.filePath());
+                        return true;
+                    } else {
+                        QMessageBox::critical(this, QStringLiteral("保存失败"), forceRes.errorMessage);
+                        return false;
+                    }
                 }
             }
             return false;
         } else {
-            QMessageBox::critical(this, QStringLiteral("保存失败"), res.errorMessage);
+            if (interactive) {
+                QMessageBox::critical(this, QStringLiteral("保存失败"), res.errorMessage);
+            }
             return false;
         }
     }
 
     m_editorView->undoStack().setSaveCheckpoint();
+    m_suppressedExternalChangeHash.clear();
     addRecentFile(m_session.filePath());
     updateTitle();
+    updateFileWatcher(m_session.filePath());
     return true;
 }
 
-bool MainWindow::saveFileAs() {
-    QString defaultPath = m_session.isUntitled() ? QStringLiteral("未命名.md") : m_session.filePath();
-    QString path = QFileDialog::getSaveFileName(this, QStringLiteral("另存为"), defaultPath, QStringLiteral("Markdown Files (*.md);;All Files (*.*)"));
-    if (path.isEmpty()) {
-        return false;
+bool MainWindow::saveFileAs(bool interactive) {
+    QString path;
+    if (interactive) {
+        QString defaultPath = m_session.isUntitled() ? QStringLiteral("未命名.md") : m_session.filePath();
+        path = QFileDialog::getSaveFileName(this, QStringLiteral("另存为"), defaultPath, QStringLiteral("Markdown Files (*.md);;All Files (*.*)"));
+        if (path.isEmpty()) {
+            return false;
+        }
+    } else {
+        path = m_session.filePath();
+        if (path.isEmpty()) {
+            return false;
+        }
     }
+
+    struct SaveGuard {
+        bool &flag;
+        SaveGuard(bool &f) : flag(f) { flag = true; }
+        ~SaveGuard() { flag = false; }
+    } guard(m_isSelfSaving);
 
     // Transactional save as
     auto res = m_session.saveAs(path, m_editorView->buffer());
     if (!res.success) {
-        QMessageBox::critical(this, QStringLiteral("另存为失败"), res.errorMessage);
+        if (interactive) {
+            QMessageBox::critical(this, QStringLiteral("另存为失败"), res.errorMessage);
+        }
         return false;
     }
 
     m_editorView->undoStack().setSaveCheckpoint();
+    m_suppressedExternalChangeHash.clear();
     addRecentFile(m_session.filePath());
     updateTitle();
+    updateFileWatcher(m_session.filePath());
     return true;
 }
 
@@ -761,7 +945,9 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
 void MainWindow::closeEvent(QCloseEvent *event) {
     if (maybeSave()) {
         savePreferences();
-        if (!m_session.isUntitled()) {
+        if (m_session.isUntitled()) {
+            File::FileService::removeUntitledRecoverySnapshot(m_session.untitledId());
+        } else {
             File::FileService::removeRecoverySnapshot(m_session.filePath());
         }
         event->accept();

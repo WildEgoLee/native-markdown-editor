@@ -8,6 +8,7 @@
 #include <QLabel>
 #include <QSplitter>
 #include <QTimer>
+#include <QFileSystemWatcher>
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
 #include <QDropEvent>
@@ -28,8 +29,11 @@ public:
 
     bool openFile(const QString &filePath);
     bool openFile(const QString &filePath, bool interactive);
-    bool saveFile();
-    bool saveFileAs();
+    bool saveFile(bool interactive = true, bool forceOverwrite = false);
+    bool saveFileAs(bool interactive = true);
+    bool reloadCurrentFile();
+    void handleExternalFileModification(bool interactive = true);
+    bool checkUntitledRecoverySnapshot(bool interactive = true);
 
     void loadPreferences(QSettings *settings = nullptr);
     void savePreferences(QSettings *settings = nullptr);
@@ -37,6 +41,9 @@ public:
     Editor::NativeEditorView *editorView() const { return m_editorView; }
     SidebarWidget *sidebar() const { return m_sidebar; }
     FindReplaceBar *findBar() const { return m_findBar; }
+    File::DocumentSession &session() { return m_session; }
+    const File::DocumentSession &session() const { return m_session; }
+    QFileSystemWatcher *fileWatcher() const { return m_fileWatcher; }
     const QStringList &recentFiles() const { return m_recentFiles; }
     QMenu *recentFilesMenu() const { return m_recentMenu; }
     QAction *actWidthAdaptive() const { return m_actWidthAdaptive; }
@@ -66,12 +73,14 @@ private slots:
     void updateStatusBar(int line, int col, int offset);
     void onCleanStateChanged(bool isClean);
     void onRecoveryTimer();
+    void onExternalFileChanged(const QString &path);
 
 private:
     void setupUi();
     void setupActions();
     void setupMenusAndToolbars();
     bool maybeSave();
+    void updateFileWatcher(const QString &newPath);
 
     SidebarWidget *m_sidebar = nullptr;
     Editor::NativeEditorView *m_editorView = nullptr;
@@ -87,6 +96,10 @@ private:
     File::DocumentSession m_session;
     QTimer *m_recoveryTimer = nullptr;
     QTimer *m_outlineDebounceTimer = nullptr;
+    QFileSystemWatcher *m_fileWatcher = nullptr;
+    QTimer *m_externalChangeDebounceTimer = nullptr;
+    bool m_isSelfSaving = false;
+    QByteArray m_suppressedExternalChangeHash;
 
     QAction *m_tbSidebar = nullptr;
     QAction *m_tbNew = nullptr;

@@ -113,6 +113,8 @@ private slots:
     void testWideTableHorizontalScrollingAndNavigation();
     void testTableCellInlineFormatChangeInvalidatesLayoutCache();
     void testFormattedTableCellSelectionHighlightAndCursorStep();
+    void testUntitledDocumentCrashRecoverySnapshot();
+    void testExternalFileModificationWatcher();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempSettingsDir;
@@ -4980,9 +4982,14 @@ void TestProbes::testTableCellInlineFormatChangeInvalidatesLayoutCache() {
     QVERIFY2(incCell2.layout->formats()[0].format.fontWeight() != QFont::Bold, "Incremental edit must remove bold format!");
 
     // Verify equivalence with a freshly computed cold layout
+    Parser::MarkdownParserAdapter coldParser;
+    auto coldTree = coldParser.parse(view.buffer());
+    Mapping::DisplayProjection coldProj;
+    coldProj.buildProjection(coldTree, view.buffer(), view.cursorPos(), false);
     Editor::LayoutEngine coldEngine;
-    coldEngine.layout(view.projection(), view.viewport()->width());
-    assertVisualBlocksDeepEqual(view.projection().blocks(), view.projection().blocks());
+    coldEngine.layout(coldProj, view.viewport()->width());
+
+    assertVisualBlocksDeepEqual(view.projection().blocks(), coldProj.blocks());
     QCOMPARE(view.layoutEngine().blocks().size(), coldEngine.blocks().size());
     QCOMPARE(view.layoutEngine().blocks()[0].rect, coldEngine.blocks()[0].rect);
 }
@@ -5111,6 +5118,148 @@ void TestProbes::testFormattedTableCellSelectionHighlightAndCursorStep() {
         }
     }
     QCOMPARE(diffPixelsUnsel, 0); // "数据" must have zero selection highlight differential pixels!
+}
+
+void TestProbes::testUntitledDocumentCrashRecoverySnapshot() {
+    // 1. Core FileService API for Untitled Snapshots
+    Core::TextBuffer buf;
+    buf.setText(QStringLiteral("# 未命名草稿标题\n\n这是非常重要的未保存正文内容，绝不能在崩溃时丢失。"));
+
+    QString testUntitledId = QStringLiteral("probe_test_untitled_token_9876");
+    bool writeOk = File::FileService::writeUntitledRecoverySnapshot(testUntitledId, buf);
+    QVERIFY(writeOk);
+
+    QString snapshotPath = File::FileService::findUntitledRecoverySnapshot(testUntitledId);
+    QVERIFY(!snapshotPath.isEmpty());
+    QVERIFY(QFile::exists(snapshotPath));
+
+    QStringList allSnapshots = File::FileService::findUntitledRecoverySnapshots();
+    QVERIFY(!allSnapshots.isEmpty());
+    QVERIFY(allSnapshots.contains(snapshotPath));
+
+    Core::TextBuffer readBackBuf;
+    QString loadErr;
+    bool readOk = File::FileService::loadFile(snapshotPath, readBackBuf, loadErr);
+    QVERIFY(readOk);
+    QCOMPARE(readBackBuf.text(), buf.text());
+
+    // 2. DocumentSession token management
+    File::DocumentSession session;
+    QVERIFY(session.isUntitled());
+    QVERIFY(!session.untitledId().isEmpty());
+    QString originalId = session.untitledId();
+
+    session.resetToUntitled(buf);
+    QVERIFY(session.isUntitled());
+    QVERIFY(session.untitledId() != originalId); // Must generate a new unique token for fresh untitled document
+
+    // 3. SaveAs cleans up untitled recovery snapshot
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString targetFile = tempDir.filePath(QStringLiteral("saved_from_untitled.md"));
+
+    // Write a snapshot for this session's untitled ID
+    File::FileService::writeUntitledRecoverySnapshot(session.untitledId(), buf);
+    QVERIFY(!File::FileService::findUntitledRecoverySnapshot(session.untitledId()).isEmpty());
+
+    auto saveRes = session.saveAs(targetFile, buf);
+    QVERIFY(saveRes.success);
+    QVERIFY(!session.isUntitled());
+    QCOMPARE(session.filePath(), targetFile);
+
+    // Snapshot for the untitled ID must have been cleanly removed upon save-as
+    QVERIFY(File::FileService::findUntitledRecoverySnapshot(session.untitledId()).isEmpty());
+
+    // 4. MainWindow untitled crash recovery restoration
+    UI::MainWindow win;
+    QString winDraftToken = QStringLiteral("win_draft_uuid_5544");
+    Core::TextBuffer draftBuf;
+    draftBuf.setText(QStringLiteral("来自上次崩溃的未命名草稿内容"));
+    File::FileService::writeUntitledRecoverySnapshot(winDraftToken, draftBuf);
+
+    bool recovered = win.checkUntitledRecoverySnapshot(false); // Non-interactive mode
+    QVERIFY(recovered);
+    QCOMPARE(win.editorView()->buffer().text(), draftBuf.text());
+    QVERIFY(win.editorView()->undoStack().isDirty());
+
+    // Clean up test snapshots
+    File::FileService::removeUntitledRecoverySnapshot(testUntitledId);
+    File::FileService::removeUntitledRecoverySnapshot(winDraftToken);
+}
+
+void TestProbes::testExternalFileModificationWatcher() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    QString filePath = tempDir.filePath(QStringLiteral("watched_doc.md"));
+    {
+        QFile f(filePath);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(QByteArray("这是初始文档内容。\n第二行文本。\n"));
+        f.close();
+    }
+
+    UI::MainWindow win;
+    bool opened = win.openFile(filePath, false);
+    QVERIFY(opened);
+    QCOMPARE(win.editorView()->buffer().text(), QStringLiteral("这是初始文档内容。\n第二行文本。\n"));
+    QVERIFY(!win.editorView()->undoStack().isDirty());
+
+    // Verify file watcher is monitoring the opened file
+    QVERIFY(win.fileWatcher() != nullptr);
+    QVERIFY(win.fileWatcher()->files().contains(filePath));
+
+    // 1. External modification in Clean State -> Smooth auto-reload
+    {
+        QFile f(filePath);
+        QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        f.write(QByteArray("外部程序修改了此文件内容！\n第二行新数据。\n"));
+        f.close();
+    }
+
+    // Trigger external modification check
+    win.handleExternalFileModification(false);
+
+    // Verify buffer was reloaded automatically and dirty state remains false
+    QCOMPARE(win.editorView()->buffer().text(), QStringLiteral("外部程序修改了此文件内容！\n第二行新数据。\n"));
+    QVERIFY(!win.editorView()->undoStack().isDirty());
+
+    // 2. External modification in Dirty State -> Conflict protection (preserves local edits)
+    // Make a local edit and mark dirty
+    win.editorView()->buffer().replace(0, 4, QStringLiteral("本地编辑"));
+    win.editorView()->undoStack().markDirty();
+    QVERIFY(win.editorView()->undoStack().isDirty());
+
+    // Modify disk again externally
+    {
+        QFile f(filePath);
+        QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        f.write(QByteArray("冲突！外部第三方二次修改！\n"));
+        f.close();
+    }
+
+    // Trigger external modification check in non-interactive mode
+    win.handleExternalFileModification(false);
+
+    // Under dirty conflict, local edits must be preserved to prevent data loss
+    QVERIFY(win.editorView()->buffer().text().startsWith(QStringLiteral("本地编辑")));
+    QVERIFY(win.editorView()->undoStack().isDirty());
+
+    // 3. Self-saving conflict verification:
+    // Calling saveFile without force fails due to external conflict (non-blocking)
+    bool normalSaved = win.saveFile(false, false);
+    QVERIFY(!normalSaved);
+    QVERIFY(win.editorView()->undoStack().isDirty());
+
+    // Calling saveFile with forceOverwrite succeeds and updates lastKnownHash
+    bool forceSaved = win.saveFile(false, true);
+    QVERIFY(forceSaved);
+    QVERIFY(!win.editorView()->undoStack().isDirty());
+    QCOMPARE(win.session().lastKnownHash(), File::FileService::calculateFileHash(filePath));
+
+    // Normal save on clean state now succeeds without conflict
+    bool cleanSaved = win.saveFile(false, false);
+    QVERIFY(cleanSaved);
 }
 
 QTEST_MAIN(TestProbes)

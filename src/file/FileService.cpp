@@ -201,4 +201,85 @@ QString FileService::findRecoverySnapshot(const QString &originalFilePath) {
     return QString();
 }
 
+static QString getUntitledRecoveryFileName(const QString &untitledId) {
+    return QStringLiteral("rec_untitled_%1.md").arg(untitledId);
+}
+
+bool FileService::writeUntitledRecoverySnapshot(const QString &untitledId, const Core::TextBuffer &buffer) {
+    if (untitledId.isEmpty()) {
+        return false;
+    }
+    QString recDir = recoveryDirectory();
+    QString targetRecPath = QDir(recDir).filePath(getUntitledRecoveryFileName(untitledId));
+    QString tempRecPath = targetRecPath + QStringLiteral(".tmp_%1").arg(QRandomGenerator::global()->generate());
+
+    QFile file(tempRecPath);
+    if (!file.open(QIODevice::WriteOnly)) {
+        return false;
+    }
+
+    QByteArray data = buffer.toBytes();
+    qint64 written = file.write(data);
+    if (written != data.size()) {
+        file.close();
+        file.remove();
+        return false;
+    }
+
+    file.flush();
+    file.close();
+
+#ifdef Q_OS_WIN
+    std::wstring wTemp = tempRecPath.toStdWString();
+    std::wstring wTarget = targetRecPath.toStdWString();
+    BOOL ok = MoveFileExW(wTemp.c_str(), wTarget.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    if (!ok) {
+        file.remove();
+        return false;
+    }
+#else
+    if (QFile::exists(targetRecPath)) {
+        QFile::remove(targetRecPath);
+    }
+    if (!QFile::rename(tempRecPath, targetRecPath)) {
+        file.remove();
+        return false;
+    }
+#endif
+    return true;
+}
+
+void FileService::removeUntitledRecoverySnapshot(const QString &untitledId) {
+    if (untitledId.isEmpty()) {
+        return;
+    }
+    QString recPath = QDir(recoveryDirectory()).filePath(getUntitledRecoveryFileName(untitledId));
+    if (QFile::exists(recPath)) {
+        QFile::remove(recPath);
+    }
+}
+
+QString FileService::findUntitledRecoverySnapshot(const QString &untitledId) {
+    if (untitledId.isEmpty()) {
+        return QString();
+    }
+    QString recPath = QDir(recoveryDirectory()).filePath(getUntitledRecoveryFileName(untitledId));
+    if (QFile::exists(recPath)) {
+        return recPath;
+    }
+    return QString();
+}
+
+QStringList FileService::findUntitledRecoverySnapshots() {
+    QDir dir(recoveryDirectory());
+    QStringList filters;
+    filters << QStringLiteral("rec_untitled_*.md");
+    QFileInfoList list = dir.entryInfoList(filters, QDir::Files, QDir::Time);
+    QStringList result;
+    for (const auto &info : list) {
+        result.append(info.absoluteFilePath());
+    }
+    return result;
+}
+
 } // namespace MarkdownTool::File

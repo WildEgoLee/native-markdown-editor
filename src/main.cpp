@@ -93,6 +93,8 @@ int main(int argc, char *argv[]) {
     bool openFileResult = true;
     if (!fileToOpen.isEmpty()) {
         openFileResult = window->openFile(fileToOpen, !isGuiSmokeTest);
+    } else if (!isGuiSmokeTest) {
+        window->checkUntitledRecoverySnapshot(true);
     }
 
     if (isGuiSmokeTest) {

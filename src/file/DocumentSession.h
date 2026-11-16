@@ -6,15 +6,20 @@
 #include <QString>
 #include <QByteArray>
 #include <QFileInfo>
+#include <QUuid>
 
 namespace MarkdownTool::File {
 
 class DocumentSession {
 public:
-    DocumentSession() = default;
+    DocumentSession() {
+        m_untitledId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    }
 
     bool isUntitled() const { return m_filePath.isEmpty(); }
     const QString &filePath() const { return m_filePath; }
+    const QString &untitledId() const { return m_untitledId; }
+    void setUntitledId(const QString &id) { m_untitledId = id; }
     const QByteArray &lastKnownHash() const { return m_lastKnownHash; }
 
     QString displayName() const {
@@ -24,9 +29,12 @@ public:
     void resetToUntitled(Core::TextBuffer &buffer) {
         if (!m_filePath.isEmpty()) {
             FileService::removeRecoverySnapshot(m_filePath);
+        } else if (!m_untitledId.isEmpty()) {
+            FileService::removeUntitledRecoverySnapshot(m_untitledId);
         }
         m_filePath.clear();
         m_lastKnownHash.clear();
+        m_untitledId = QUuid::createUuid().toString(QUuid::WithoutBraces);
         buffer.setText(QString());
     }
 
@@ -37,6 +45,10 @@ public:
         if (!m_filePath.isEmpty() && m_filePath != targetPath) {
             FileService::removeRecoverySnapshot(m_filePath);
         }
+        if (!m_untitledId.isEmpty()) {
+            FileService::removeUntitledRecoverySnapshot(m_untitledId);
+            m_untitledId.clear();
+        }
         m_filePath = targetPath;
         m_lastKnownHash = FileService::calculateFileHash(targetPath);
         return true;
@@ -45,6 +57,10 @@ public:
     // Attach file path and disk baseline hash without reading content from disk
     // (Used when buffer has already been restored from a recovery snapshot or external source)
     void attachFile(const QString &targetPath, const QByteArray &diskHash = QByteArray()) {
+        if (!m_untitledId.isEmpty()) {
+            FileService::removeUntitledRecoverySnapshot(m_untitledId);
+            m_untitledId.clear();
+        }
         m_filePath = targetPath;
         m_lastKnownHash = diskHash.isEmpty() ? FileService::calculateFileHash(targetPath) : diskHash;
     }
@@ -73,6 +89,10 @@ public:
             if (!m_filePath.isEmpty() && m_filePath != newPath) {
                 FileService::removeRecoverySnapshot(m_filePath);
             }
+            if (!m_untitledId.isEmpty()) {
+                FileService::removeUntitledRecoverySnapshot(m_untitledId);
+                m_untitledId.clear();
+            }
             m_filePath = newPath;
             m_lastKnownHash = FileService::calculateFileHash(newPath);
             FileService::removeRecoverySnapshot(m_filePath);
@@ -82,6 +102,7 @@ public:
 
 private:
     QString m_filePath;
+    QString m_untitledId;
     QByteArray m_lastKnownHash;
 };
 

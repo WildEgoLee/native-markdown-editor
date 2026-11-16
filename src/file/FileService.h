@@ -28,6 +28,12 @@ public:
     static bool writeRecoverySnapshot(const QString &originalFilePath, const Core::TextBuffer &buffer);
     static void removeRecoverySnapshot(const QString &originalFilePath);
     static QString findRecoverySnapshot(const QString &originalFilePath);
+
+    // Untitled document crash recovery support
+    static bool writeUntitledRecoverySnapshot(const QString &untitledId, const Core::TextBuffer &buffer);
+    static void removeUntitledRecoverySnapshot(const QString &untitledId);
+    static QString findUntitledRecoverySnapshot(const QString &untitledId);
+    static QStringList findUntitledRecoverySnapshots();
 };
 
 } // namespace MarkdownTool::File

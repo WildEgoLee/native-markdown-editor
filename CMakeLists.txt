@@ -79,6 +79,8 @@ set(CORE_SOURCES
     src/render/MermaidSvgRenderer.cpp
     src/render/AsyncRenderService.h
     src/render/AsyncRenderService.cpp
+    src/render/ImageService.h
+    src/render/ImageService.cpp
 
     src/file/FileService.h
     src/file/FileService.cpp

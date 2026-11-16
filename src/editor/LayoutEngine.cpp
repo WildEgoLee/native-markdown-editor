@@ -2,6 +2,7 @@
 #include "render/AsyncRenderService.h"
 #include "render/MathSvgRenderer.h"
 #include "render/MermaidSvgRenderer.h"
+#include "render/ImageService.h"
 
 #include <QPainterPath>
 #include <QAbstractTextDocumentLayout>
@@ -73,6 +74,37 @@ void LayoutEngine::layoutSingleBlock(const Mapping::VisualBlock &vBlock,
     bData.isMermaidBlock = vBlock.isMermaidBlock;
     bData.isInteractiveActive = vBlock.isInteractiveActive;
     bData.embeddedSource = vBlock.embeddedSource;
+
+    bData.isImageBlock = vBlock.isImageBlock;
+    bData.imagePath = vBlock.imagePath;
+    bData.imageAltText = vBlock.imageAltText;
+
+    // Collapsed Image Component (Live Preview Mode, cursor outside)
+    if (vBlock.isImageBlock && !vBlock.isInteractiveActive) {
+        currentY += vBlock.marginTop;
+        QSize imgSize = Render::ImageService::instance()->getImageSize(vBlock.imagePath, m_contentWidth);
+        qreal imgW = std::clamp(static_cast<qreal>(imgSize.width()), 80.0, m_contentWidth);
+        qreal imgH = std::max(40.0, static_cast<qreal>(imgSize.height()));
+
+        bData.rect = QRectF(m_contentLeft, currentY, m_contentWidth, imgH + 8.0);
+        qreal imgX = m_contentLeft + (m_contentWidth - imgW) / 2.0;
+        bData.imageRect = QRectF(imgX, currentY + 4.0, imgW, imgH);
+        currentY += bData.rect.height() + vBlock.marginBottom;
+
+        bData.cachedText = vBlock.visualText;
+        bData.cachedSegments = vBlock.segments;
+        bData.cachedIndentLevel = vBlock.indentLevel;
+        bData.cachedHeadingLevel = vBlock.headingLevel;
+        bData.cachedMarginTop = vBlock.marginTop;
+        bData.cachedMarginBottom = vBlock.marginBottom;
+        bData.cachedIsQuote = vBlock.isQuote;
+        bData.cachedIsCodeBlock = vBlock.isCodeBlock;
+        bData.cachedBlockType = vBlock.blockType;
+        bData.hasIme = false;
+
+        m_blocks.append(std::move(bData));
+        return;
+    }
 
     // Collapsed Embedded Component (Live Preview Mode, cursor outside)
     if ((vBlock.isMathBlock || vBlock.isMermaidBlock) && !vBlock.isInteractiveActive) {
@@ -343,12 +375,22 @@ void LayoutEngine::layoutSingleBlock(const Mapping::VisualBlock &vBlock,
         } else {
             previewH = std::max(64.0, static_cast<qreal>(Render::MathSvgRenderer::estimateSize(vBlock.embeddedSource).height() + 20.0));
         }
+    } else if (vBlock.isImageBlock) {
+        QSize imgSize = Render::ImageService::instance()->getImageSize(vBlock.imagePath, blockContentWidth);
+        previewH = std::max(40.0, static_cast<qreal>(imgSize.height()));
     }
 
     qreal totalBlockH = y + (previewH > 0 ? (previewH + 12.0) : 0.0);
     bData.rect = QRectF(m_contentLeft, currentY, m_contentWidth, totalBlockH);
     if (previewH > 0) {
-        bData.embeddedPreviewRect = QRectF(bData.rect.left(), bData.rect.top() + y + 8.0, bData.rect.width(), previewH);
+        if (vBlock.isImageBlock) {
+            QSize imgSize = Render::ImageService::instance()->getImageSize(vBlock.imagePath, blockContentWidth);
+            qreal imgW = std::clamp(static_cast<qreal>(imgSize.width()), 80.0, blockContentWidth);
+            qreal imgX = m_contentLeft + (m_contentWidth - imgW) / 2.0;
+            bData.imageRect = QRectF(imgX, bData.rect.top() + y + 6.0, imgW, previewH);
+        } else {
+            bData.embeddedPreviewRect = QRectF(bData.rect.left(), bData.rect.top() + y + 8.0, bData.rect.width(), previewH);
+        }
     }
     currentY += totalBlockH + vBlock.marginBottom;
 
@@ -378,6 +420,9 @@ void LayoutEngine::reuseBlock(const BlockLayoutData &src,
     bData.isMermaidBlock = src.isMermaidBlock;
     bData.isTableBlock = src.isTableBlock;
     bData.tableLayout = src.tableLayout;
+    bData.isImageBlock = src.isImageBlock;
+    bData.imagePath = src.imagePath;
+    bData.imageAltText = src.imageAltText;
     bData.isInteractiveActive = src.isInteractiveActive;
     bData.embeddedSource = src.embeddedSource;
     bData.cachedText = src.cachedText;
@@ -395,6 +440,10 @@ void LayoutEngine::reuseBlock(const BlockLayoutData &src,
     qreal h = src.rect.height();
     qreal dy = currentY - src.rect.top();
     bData.rect = QRectF(m_contentLeft, currentY, m_contentWidth, h);
+    if (!src.imageRect.isEmpty()) {
+        bData.imageRect = src.imageRect;
+        bData.imageRect.translate(0, dy);
+    }
     if (!src.embeddedPreviewRect.isEmpty()) {
         bData.embeddedPreviewRect = QRectF(m_contentLeft, currentY + (src.embeddedPreviewRect.top() - src.rect.top()), m_contentWidth, src.embeddedPreviewRect.height());
     }
@@ -429,6 +478,9 @@ bool LayoutEngine::isBlockLayoutEqual(const Mapping::VisualBlock &vBlock,
     }
     if (prevData.isMathBlock != vBlock.isMathBlock ||
         prevData.isMermaidBlock != vBlock.isMermaidBlock ||
+        prevData.isImageBlock != vBlock.isImageBlock ||
+        prevData.imagePath != vBlock.imagePath ||
+        prevData.imageAltText != vBlock.imageAltText ||
         prevData.isTableBlock != vBlock.isTableBlock ||
         prevData.isInteractiveActive != vBlock.isInteractiveActive ||
         prevData.embeddedSource != vBlock.embeddedSource)
@@ -458,7 +510,7 @@ bool LayoutEngine::isBlockLayoutEqual(const Mapping::VisualBlock &vBlock,
             }
         }
     }
-    if (!prevData.layout && (!prevData.isMathBlock && !prevData.isMermaidBlock && !prevData.isTableBlock)) {
+    if (!prevData.layout && (!prevData.isMathBlock && !prevData.isMermaidBlock && !prevData.isTableBlock && !prevData.isImageBlock)) {
         return false;
     }
     if (prevData.cachedText != vBlock.visualText ||
@@ -842,6 +894,50 @@ void LayoutEngine::paint(QPainter *painter,
 
                 painter->restore();
                 continue; // Do not draw code text when collapsed
+            }
+        }
+
+        // Draw Image Component
+        if (bData.isImageBlock) {
+            auto drawImageOrCard = [&](const QRectF &targetRect) {
+                if (targetRect.isEmpty()) return;
+                painter->save();
+                painter->setRenderHint(QPainter::Antialiasing, true);
+
+                QPixmap pix = Render::ImageService::instance()->getImage(bData.imagePath);
+                if (!pix.isNull()) {
+                    painter->setRenderHint(QPainter::SmoothPixmapTransform, true);
+                    QPainterPath clipPath;
+                    clipPath.addRoundedRect(targetRect, 6.0, 6.0);
+                    painter->setClipPath(clipPath);
+                    painter->drawPixmap(targetRect.toRect(), pix);
+
+                    painter->setClipping(false);
+                    painter->setPen(QPen(palette.cardBorder, 1.0));
+                    painter->setBrush(Qt::NoBrush);
+                    painter->drawRoundedRect(targetRect, 6.0, 6.0);
+                } else {
+                    painter->setPen(QPen(palette.cardBorder, 1.0, Qt::DashLine));
+                    painter->setBrush(palette.cardBackground);
+                    painter->drawRoundedRect(targetRect, 6.0, 6.0);
+
+                    painter->setPen(palette.secondaryText);
+                    QFont hintFont = painter->font();
+                    hintFont.setPointSize(9);
+                    painter->setFont(hintFont);
+                    QString tip = bData.imageAltText.isEmpty()
+                        ? QStringLiteral("🖼️ [图片未能加载: %1]").arg(bData.imagePath)
+                        : QStringLiteral("🖼️ %1 (%2)").arg(bData.imageAltText, bData.imagePath);
+                    painter->drawText(targetRect, Qt::AlignCenter, tip);
+                }
+                painter->restore();
+            };
+
+            if (!bData.isInteractiveActive) {
+                drawImageOrCard(bData.imageRect);
+                continue;
+            } else if (!bData.imageRect.isEmpty()) {
+                drawImageOrCard(bData.imageRect);
             }
         }
 

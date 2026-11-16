@@ -90,6 +90,12 @@ struct BlockLayoutData {
     QString embeddedSource;
     QRectF embeddedPreviewRect;
 
+    // Image Component data
+    bool isImageBlock = false;
+    QString imagePath;
+    QString imageAltText;
+    QRectF imageRect;
+
     // Table Component data
     bool isTableBlock = false;
     TableBlockLayout tableLayout;

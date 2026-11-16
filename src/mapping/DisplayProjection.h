@@ -125,6 +125,11 @@ struct VisualBlock {
     bool isInteractiveActive = false;
     qreal embeddedHeight = 0.0;
 
+    // Image Embedded Component attributes
+    bool isImageBlock = false;
+    QString imagePath;
+    QString imageAltText;
+
     // Table component attributes
     bool isTableBlock = false;
     TableVisualData tableData;

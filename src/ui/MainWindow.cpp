@@ -738,6 +738,7 @@ void MainWindow::newFile() {
     updateFileWatcher(QString());
     m_suppressedExternalChangeHash.clear();
     m_session.resetToUntitled(m_editorView->buffer());
+    m_editorView->setDocumentPath(QString());
     m_editorView->undoStack().clear();
     m_editorView->undoStack().setSaveCheckpoint();
     updateTitle();
@@ -786,6 +787,7 @@ bool MainWindow::openFile(const QString &filePath, bool interactive) {
             if (File::FileService::loadFile(recPath, m_editorView->buffer(), err)) {
                 // Initialize session to target file and baseline hash, without overwriting recovered buffer
                 m_session.attachFile(filePath);
+                m_editorView->setDocumentPath(filePath);
                 addRecentFile(filePath);
                 updateFileWatcher(filePath);
                 m_suppressedExternalChangeHash.clear();
@@ -810,6 +812,7 @@ bool MainWindow::openFile(const QString &filePath, bool interactive) {
         return false;
     }
 
+    m_editorView->setDocumentPath(filePath);
     m_editorView->undoStack().clear();
     m_editorView->undoStack().setSaveCheckpoint();
     addRecentFile(filePath);
@@ -864,6 +867,7 @@ bool MainWindow::saveFile(bool interactive, bool forceOverwrite) {
     }
 
     m_editorView->undoStack().setSaveCheckpoint();
+    m_editorView->setDocumentPath(m_session.filePath());
     m_suppressedExternalChangeHash.clear();
     addRecentFile(m_session.filePath());
     updateTitle();
@@ -902,6 +906,7 @@ bool MainWindow::saveFileAs(bool interactive) {
     }
 
     m_editorView->undoStack().setSaveCheckpoint();
+    m_editorView->setDocumentPath(m_session.filePath());
     m_suppressedExternalChangeHash.clear();
     addRecentFile(m_session.filePath());
     updateTitle();

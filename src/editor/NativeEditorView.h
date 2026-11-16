@@ -53,6 +53,9 @@ public:
     bool isSourceMode() const { return m_isSourceMode; }
     void setSourceMode(bool enabled);
 
+    void setDocumentPath(const QString &path);
+    const QString &documentPath() const { return m_documentPath; }
+
     const Mapping::DisplayProjection &projection() const { return m_projection; }
     const LayoutEngine &layoutEngine() const { return m_layoutEngine; }
 
@@ -166,6 +169,7 @@ private:
     quint64 m_fullParseFallbacks = 0;
     int m_accumulatedZoomDelta = 0;
     bool m_isVisualRefreshing = false;
+    QString m_documentPath;
 };
 
 } // namespace MarkdownTool::Editor

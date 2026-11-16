@@ -32,6 +32,7 @@
 #include "render/MathSvgRenderer.h"
 #include "render/MermaidSvgRenderer.h"
 #include "render/AsyncRenderService.h"
+#include "render/ImageService.h"
 #include "theme/Theme.h"
 #include "ui/MainWindow.h"
 #include "ui/FindReplaceBar.h"
@@ -115,6 +116,7 @@ private slots:
     void testFormattedTableCellSelectionHighlightAndCursorStep();
     void testUntitledDocumentCrashRecoverySnapshot();
     void testExternalFileModificationWatcher();
+    void testInPlaceImageRenderingAndPaste();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempSettingsDir;
@@ -5260,6 +5262,121 @@ void TestProbes::testExternalFileModificationWatcher() {
     // Normal save on clean state now succeeds without conflict
     bool cleanSaved = win.saveFile(false, false);
     QVERIFY(cleanSaved);
+}
+
+void TestProbes::testInPlaceImageRenderingAndPaste() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString docPath = tempDir.filePath(QStringLiteral("test_image.md"));
+    QString assetsDir = tempDir.filePath(QStringLiteral("assets"));
+    QDir().mkpath(assetsDir);
+
+    // 1. Generate local PNG image
+    QString samplePngPath = assetsDir + QStringLiteral("/sample.png");
+    QImage sampleImg(120, 80, QImage::Format_ARGB32);
+    sampleImg.fill(QColor(60, 140, 220));
+    QVERIFY(sampleImg.save(samplePngPath, "PNG"));
+
+    // 2. ImageService basic functionality test
+    auto *service = Render::ImageService::instance();
+    service->setDocumentPath(docPath);
+    QCOMPARE(service->documentPath(), docPath);
+
+    // Path resolution
+    QString resolved = service->resolveImagePath(QStringLiteral("assets/sample.png"));
+    QCOMPARE(QFileInfo(resolved).canonicalFilePath(), QFileInfo(samplePngPath).canonicalFilePath());
+
+    // Probed size
+    QSize probed = service->getImageSize(QStringLiteral("assets/sample.png"), 800);
+    QCOMPARE(probed, QSize(120, 80));
+
+    // Pixmap retrieval and caching
+    QPixmap pix1 = service->getImage(QStringLiteral("assets/sample.png"));
+    QVERIFY(!pix1.isNull());
+    QCOMPARE(pix1.size(), QSize(120, 80));
+
+    // Non-existent image handling
+    QPixmap nullPix = service->getImage(QStringLiteral("assets/non_existent.png"));
+    QVERIFY(nullPix.isNull());
+
+    // 3. NativeEditorView In-place Image Rendering (Typora-style)
+    Editor::NativeEditorView view;
+    view.resize(800, 600);
+    view.setDocumentPath(docPath);
+    view.buffer().setText(QStringLiteral("# 图像章节\n\n![示例图](assets/sample.png)\n\n段落说明文本\n"));
+
+    // Case A: Cursor outside image block (Cursor at pos 0 in header)
+    view.setCursorPos(0);
+    QCOMPARE(view.cursorPos(), 0);
+
+    const auto &blocks = view.projection().blocks();
+    QVERIFY(blocks.size() >= 3);
+    // Find image block (block index 1)
+    const auto &imgBlock = blocks[1];
+    QVERIFY(imgBlock.isImageBlock);
+    QCOMPARE(imgBlock.imagePath, QStringLiteral("assets/sample.png"));
+    QCOMPARE(imgBlock.imageAltText, QStringLiteral("示例图"));
+    QVERIFY(!imgBlock.isInteractiveActive); // Collapsed in Live Preview mode
+    QVERIFY(imgBlock.visualText.isEmpty()); // Raw markdown syntax is hidden
+
+    // Verify LayoutEngine dimensions
+    const auto &layoutBlocks = view.layoutEngine().blocks();
+    QVERIFY(layoutBlocks.size() >= 3);
+    const auto &imgLayout = layoutBlocks[1];
+    QVERIFY(imgLayout.isImageBlock);
+    QVERIFY(!imgLayout.imageRect.isEmpty());
+    QCOMPARE(imgLayout.imageRect.size().toSize(), QSize(120, 80));
+
+    // Hit test on collapsed image block returns its source range start
+    QPointF clickPt = imgLayout.imageRect.center();
+    int hitOffset = view.layoutEngine().hitTest(clickPt, view.projection());
+    QCOMPARE(hitOffset, imgBlock.sourceRange.start);
+
+    // Case B: Cursor inside image block -> Expands into editable markdown
+    int syntaxPos = view.buffer().text().indexOf(QStringLiteral("!["));
+    QVERIFY(syntaxPos >= 0);
+    view.setCursorPos(syntaxPos + 2); // Inside syntax
+
+    const auto &activeBlocks = view.projection().blocks();
+    const auto &activeImgBlock = activeBlocks[1];
+    QVERIFY(activeImgBlock.isImageBlock);
+    QVERIFY(activeImgBlock.isInteractiveActive); // Active interactive mode
+    QCOMPARE(activeImgBlock.visualText, QStringLiteral("![示例图](assets/sample.png)"));
+
+    // Case C: Missing Image Fallback
+    view.buffer().setText(QStringLiteral("![丢失图](assets/missing_img.png)\n"));
+    view.setCursorPos(view.buffer().length()); // Place cursor at end
+    // Block layout survives missing image and generates fallback dimensions
+    const auto &fallbackBlocks = view.layoutEngine().blocks();
+    QVERIFY(!fallbackBlocks.isEmpty());
+    QVERIFY(fallbackBlocks[0].isImageBlock);
+
+    // 4. Clipboard Screenshot Paste
+    QImage clipImg(80, 50, QImage::Format_ARGB32);
+    clipImg.fill(QColor(10, 200, 100));
+    QGuiApplication::clipboard()->setImage(clipImg);
+
+    int prevLen = view.buffer().length();
+    view.setCursorPos(prevLen);
+    view.paste();
+
+    // Verify buffer contains inserted image markdown
+    QString afterPaste = view.buffer().text();
+    QVERIFY(afterPaste.contains(QStringLiteral("![image](assets/image_")));
+    QVERIFY(afterPaste.contains(QStringLiteral(".png)")));
+    QVERIFY(view.undoStack().isDirty());
+
+    // Verify the image file was actually written to the assets directory
+    static QRegularExpression re(QStringLiteral(R"(!\[image\]\((assets/image_[^)]+\.png)\))"));
+    auto match = re.match(afterPaste);
+    QVERIFY(match.hasMatch());
+    QString assetRelPath = match.captured(1);
+    QString assetFullPath = tempDir.filePath(assetRelPath);
+    QVERIFY2(QFile::exists(assetFullPath), "Pasted screenshot file must exist on disk");
+
+    QImage loadedSaved(assetFullPath);
+    QVERIFY(!loadedSaved.isNull());
+    QCOMPARE(loadedSaved.size(), QSize(80, 50));
 }
 
 QTEST_MAIN(TestProbes)

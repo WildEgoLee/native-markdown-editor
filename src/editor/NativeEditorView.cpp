@@ -1,6 +1,7 @@
 #include "NativeEditorView.h"
 #include "ui/SlashCommandPopup.h"
 #include "render/AsyncRenderService.h"
+#include "render/ImageService.h"
 
 #include <QPainter>
 #include <QMouseEvent>
@@ -666,7 +667,42 @@ void NativeEditorView::cut() {
     }
 }
 
+void NativeEditorView::setDocumentPath(const QString &path) {
+    m_documentPath = path;
+    Render::ImageService::instance()->setDocumentPath(path);
+}
+
 void NativeEditorView::paste() {
+    const QMimeData *mime = QGuiApplication::clipboard()->mimeData();
+    if (mime && mime->hasImage()) {
+        QImage img = QGuiApplication::clipboard()->image();
+        if (img.isNull()) {
+            img = qvariant_cast<QImage>(mime->imageData());
+        }
+        if (!img.isNull()) {
+            QString assetsDir;
+            if (!m_documentPath.isEmpty()) {
+                assetsDir = QFileInfo(m_documentPath).dir().filePath(QStringLiteral("assets"));
+            } else {
+                assetsDir = QDir::current().filePath(QStringLiteral("assets"));
+            }
+            QDir().mkpath(assetsDir);
+
+            QString filename = QStringLiteral("image_%1.png").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_hhmmss_zzz")));
+            QString fullImagePath = QDir(assetsDir).filePath(filename);
+
+            if (img.save(fullImagePath, "PNG")) {
+                QString relPath = QStringLiteral("assets/%1").arg(filename);
+                QString snippet = QStringLiteral("![image](%1)\n").arg(relPath);
+
+                int s = qMin(m_cursorPos, m_selectionAnchor);
+                int len = qAbs(m_cursorPos - m_selectionAnchor);
+                executeEdit(s, len, snippet);
+                return;
+            }
+        }
+    }
+
     QString text = QGuiApplication::clipboard()->text();
     if (text.isEmpty()) {
         return;

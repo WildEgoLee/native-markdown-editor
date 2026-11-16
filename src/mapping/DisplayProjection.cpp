@@ -175,6 +175,9 @@ int DisplayProjection::stepCursor(int currentSourceOffset, bool forward, const C
         int blockIdx = findBlockIndexBySourceOffset(next);
         if (blockIdx >= 0 && blockIdx < m_blocks.size()) {
             const auto &block = m_blocks[blockIdx];
+            if (block.isImageBlock) {
+                return next;
+            }
             for (const auto &seg : block.segments) {
                 if (seg.type == SegmentType::HiddenMarker && seg.sourceRange.isValid()) {
                     if (seg.sourceRange.contains(next) && next < seg.sourceRange.end) {
@@ -209,6 +212,9 @@ int DisplayProjection::stepCursor(int currentSourceOffset, bool forward, const C
         int blockIdx = findBlockIndexBySourceOffset(prev);
         if (blockIdx >= 0 && blockIdx < m_blocks.size()) {
             const auto &block = m_blocks[blockIdx];
+            if (block.isImageBlock) {
+                return prev;
+            }
             for (const auto &seg : block.segments) {
                 if (seg.type == SegmentType::HiddenMarker && seg.sourceRange.isValid()) {
                     if (seg.sourceRange.contains(prev) && prev > seg.sourceRange.start) {
@@ -257,6 +263,24 @@ int DisplayProjection::findBlockIndexBySourceOffset(int sourceOffset) const {
         return static_cast<int>(std::distance(m_blocks.begin(), it));
     }
     return m_blocks.size() - 1;
+}
+
+static QString extractNodeText(const Parser::SemanticNodePtr &node, const QString &fullText) {
+    if (!node) return QString();
+    if (!node->textContent.isEmpty()) {
+        return node->textContent;
+    }
+    if (node->children.isEmpty()) {
+        if (node->fullRange.isValid() && node->fullRange.length() > 0) {
+            return fullText.mid(node->fullRange.start, node->fullRange.length());
+        }
+        return QString();
+    }
+    QString text;
+    for (const auto &ch : node->children) {
+        text.append(extractNodeText(ch, fullText));
+    }
+    return text;
 }
 
 static void applyInlineStyles(const Parser::SemanticNodePtr &inlineNode,
@@ -370,6 +394,22 @@ static void applyInlineStyles(const Parser::SemanticNodePtr &inlineNode,
         break;
     }
 
+    case NodeType::Image: {
+        QTextCharFormat imgFormat = baseFormat;
+        imgFormat.setForeground(Theme::currentPalette().accent);
+        VisualSegment imgSeg;
+        imgSeg.sourceRange = inlineNode->fullRange;
+        QString alt = extractNodeText(inlineNode, fullText);
+        imgSeg.text = alt.isEmpty() ? QStringLiteral("🖼️ [图片]") : QStringLiteral("🖼️ [%1]").arg(alt);
+        imgSeg.visualStart = outVisualText.length();
+        imgSeg.visualLength = imgSeg.text.length();
+        imgSeg.type = SegmentType::NormalText;
+        imgSeg.format = imgFormat;
+        outVisualText.append(imgSeg.text);
+        outSegments.append(imgSeg);
+        break;
+    }
+
     case NodeType::Link: {
         QTextCharFormat linkFormat = baseFormat;
         linkFormat.setForeground(Theme::currentPalette().accent);
@@ -467,6 +507,9 @@ bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
                                                  oldBlock.isTaskChecked != newBlock.isTaskChecked ||
                                                  oldBlock.isMathBlock != newBlock.isMathBlock ||
                                                  oldBlock.isMermaidBlock != newBlock.isMermaidBlock ||
+                                                 oldBlock.isImageBlock != newBlock.isImageBlock ||
+                                                 oldBlock.imagePath != newBlock.imagePath ||
+                                                 oldBlock.imageAltText != newBlock.imageAltText ||
                                                  oldBlock.isTableBlock != newBlock.isTableBlock ||
                                                  oldBlock.isInteractiveActive != newBlock.isInteractiveActive ||
                                                  oldBlock.embeddedSource != newBlock.embeddedSource ||
@@ -566,6 +609,9 @@ bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
                 b1.isTaskChecked != b2.isTaskChecked ||
                 b1.isMathBlock != b2.isMathBlock ||
                 b1.isMermaidBlock != b2.isMermaidBlock ||
+                b1.isImageBlock != b2.isImageBlock ||
+                b1.imagePath != b2.imagePath ||
+                b1.imageAltText != b2.imageAltText ||
                 b1.isTableBlock != b2.isTableBlock ||
                 b1.isInteractiveActive != b2.isInteractiveActive ||
                 b1.embeddedSource != b2.embeddedSource ||
@@ -677,24 +723,6 @@ bool DisplayProjection::buildProjection(const Parser::SemanticNodePtr &rootNode,
         m_blocks.append(emptyBlock);
     }
     return checkChanged();
-}
-
-static QString extractNodeText(const Parser::SemanticNodePtr &node, const QString &fullText) {
-    if (!node) return QString();
-    if (!node->textContent.isEmpty()) {
-        return node->textContent;
-    }
-    if (node->children.isEmpty()) {
-        if (node->fullRange.isValid() && node->fullRange.length() > 0) {
-            return fullText.mid(node->fullRange.start, node->fullRange.length());
-        }
-        return QString();
-    }
-    QString text;
-    for (const auto &ch : node->children) {
-        text.append(extractNodeText(ch, fullText));
-    }
-    return text;
 }
 
 void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
@@ -1017,6 +1045,59 @@ void DisplayProjection::processBlockNode(const Parser::SemanticNodePtr &node,
         block.visualText = hrSeg.text;
         block.segments.append(hrSeg);
     } else {
+        // Check if paragraph is a standalone image block
+        Parser::SemanticNodePtr standaloneImg = nullptr;
+        bool hasOtherContent = false;
+        for (const auto &child : node->children) {
+            if (child->type == Parser::NodeType::Image) {
+                if (standaloneImg) {
+                    hasOtherContent = true;
+                    break;
+                }
+                standaloneImg = child;
+            } else if (child->type == Parser::NodeType::Text) {
+                if (!child->textContent.trimmed().isEmpty()) {
+                    hasOtherContent = true;
+                    break;
+                }
+            } else if (child->type != Parser::NodeType::SoftBreak && child->type != Parser::NodeType::LineBreak) {
+                hasOtherContent = true;
+                break;
+            }
+        }
+
+        if (standaloneImg && !hasOtherContent) {
+            block.isImageBlock = true;
+            block.imagePath = standaloneImg->linkUrl;
+            block.imageAltText = extractNodeText(standaloneImg, fullText);
+            block.marginTop = 10;
+            block.marginBottom = 10;
+            block.isInteractiveActive = isSourceMode || node->fullRange.contains(cursorPos);
+
+            if (block.isInteractiveActive) {
+                VisualSegment imgSeg;
+                imgSeg.sourceRange = node->fullRange;
+                imgSeg.text = fullText.mid(node->fullRange.start, node->fullRange.length());
+                imgSeg.visualStart = 0;
+                imgSeg.visualLength = imgSeg.text.length();
+                imgSeg.type = SegmentType::NormalText;
+                imgSeg.format = baseFormat;
+                block.visualText = imgSeg.text;
+                block.segments.append(imgSeg);
+            } else {
+                VisualSegment hiddenSeg;
+                hiddenSeg.sourceRange = node->fullRange;
+                hiddenSeg.text = QString();
+                hiddenSeg.visualStart = 0;
+                hiddenSeg.visualLength = 0;
+                hiddenSeg.type = SegmentType::HiddenMarker;
+                hiddenSeg.format = baseFormat;
+                block.segments.append(hiddenSeg);
+            }
+            outBlocks.append(std::move(block));
+            return;
+        }
+
         // Normal paragraph
         block.marginTop = 5;
         block.marginBottom = 5;

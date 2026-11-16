@@ -43,6 +43,12 @@
 #include <QApplication>
 #include <QMessageBox>
 #include <QAbstractButton>
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 using namespace MarkdownTool;
 
@@ -127,6 +133,9 @@ private slots:
     void testCancelledWindowClosePreservesRecoverySnapshots();
     void testAssetRelocationRollbackOnExistingConflict();
     void testDraftRecoveryPreservesUUIDAndAssets();
+    void testReadOnlyFileProtectionAndAttributePreservation();
+    void testIndeterminateHashRefusesBlindOverwrite();
+    void testAssetRelocationJournalPersistenceAndRollback();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempSettingsDir;
@@ -5827,6 +5836,200 @@ void TestProbes::testDraftRecoveryPreservesUUIDAndAssets() {
     // Staging and snapshot cleaned up after confirmed save
     QVERIFY(File::FileService::findUntitledRecoverySnapshot(testDraftId).isEmpty());
     QVERIFY(!QFile::exists(draftImageFile));
+}
+
+void TestProbes::testReadOnlyFileProtectionAndAttributePreservation() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString filePath = tempDir.filePath(QStringLiteral("readonly_doc.md"));
+
+    // 1. Write initial file
+    Core::TextBuffer initialBuffer;
+    initialBuffer.insert(0, QStringLiteral("ORIGINAL_PROTECTED_CONTENT\n"));
+    auto res1 = File::FileService::safeSaveFile(filePath, initialBuffer, QByteArray());
+    QVERIFY(res1.success);
+
+    // 2. Mark file as Read-Only
+#ifdef Q_OS_WIN
+    std::wstring wPath = filePath.toStdWString();
+    BOOL attrOk = SetFileAttributesW(wPath.c_str(), FILE_ATTRIBUTE_READONLY);
+    QVERIFY(attrOk);
+#else
+    QFile::setPermissions(filePath, QFileDevice::ReadOwner | QFileDevice::ReadUser | QFileDevice::ReadGroup | QFileDevice::ReadOther);
+#endif
+
+    // 3. Attempt to save new content into read-only file -> must be rejected!
+    Core::TextBuffer newBuffer;
+    newBuffer.insert(0, QStringLiteral("MALICIOUS_OVERWRITE_CONTENT\n"));
+    auto res2 = File::FileService::safeSaveFile(filePath, newBuffer, QByteArray());
+    QVERIFY(!res2.success);
+    QVERIFY(res2.errorMessage.contains(QStringLiteral("只读")));
+
+    // 4. Assert content was NOT touched
+    {
+        QFile f(filePath);
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        QCOMPARE(f.readAll(), QByteArray("ORIGINAL_PROTECTED_CONTENT\n"));
+    }
+
+    // Restore attributes so temp dir can be cleaned up
+#ifdef Q_OS_WIN
+    SetFileAttributesW(wPath.c_str(), FILE_ATTRIBUTE_NORMAL);
+#else
+    QFile::setPermissions(filePath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+#endif
+
+    // 5. Test attribute preservation (e.g. HIDDEN on Windows)
+#ifdef Q_OS_WIN
+    QString hiddenPath = tempDir.filePath(QStringLiteral("hidden_doc.md"));
+    Core::TextBuffer buf1;
+    buf1.insert(0, QStringLiteral("HIDDEN_CONTENT_V1\n"));
+    QVERIFY(File::FileService::safeSaveFile(hiddenPath, buf1, QByteArray()).success);
+
+    std::wstring wHidden = hiddenPath.toStdWString();
+    QVERIFY(SetFileAttributesW(wHidden.c_str(), FILE_ATTRIBUTE_HIDDEN));
+
+    DWORD attrsBefore = GetFileAttributesW(wHidden.c_str());
+    QVERIFY(attrsBefore != INVALID_FILE_ATTRIBUTES);
+    QVERIFY(attrsBefore & FILE_ATTRIBUTE_HIDDEN);
+
+    Core::TextBuffer buf2;
+    buf2.insert(0, QStringLiteral("HIDDEN_CONTENT_V2\n"));
+    auto resHidden = File::FileService::safeSaveFile(hiddenPath, buf2, QByteArray());
+    QVERIFY(resHidden.success);
+
+    DWORD attrsAfter = GetFileAttributesW(wHidden.c_str());
+    QVERIFY(attrsAfter != INVALID_FILE_ATTRIBUTES);
+    QVERIFY2(attrsAfter & FILE_ATTRIBUTE_HIDDEN, "Hidden attribute must be preserved across atomic saves");
+
+    SetFileAttributesW(wHidden.c_str(), FILE_ATTRIBUTE_NORMAL);
+#endif
+}
+
+void TestProbes::testIndeterminateHashRefusesBlindOverwrite() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString filePath = tempDir.filePath(QStringLiteral("indeterminate_hash.md"));
+
+    Core::TextBuffer buffer;
+    buffer.insert(0, QStringLiteral("INITIAL_CONTENT\n"));
+    auto res = File::FileService::safeSaveFile(filePath, buffer, QByteArray());
+    QVERIFY(res.success);
+
+    QByteArray knownHash = File::FileService::calculateFileHash(filePath);
+    QVERIFY(!knownHash.isEmpty());
+
+    // Normal check with correct hash -> no external modification
+    QVERIFY(!File::FileService::hasExternalModification(filePath, knownHash));
+
+#ifdef Q_OS_WIN
+    // Lock file exclusively with 0 share mode, preventing calculateFileHash from opening it
+    std::wstring wPath = filePath.toStdWString();
+    HANDLE hFile = CreateFileW(wPath.c_str(),
+                               GENERIC_READ | GENERIC_WRITE,
+                               0, // Exclusive lock: no other handle can read or write
+                               NULL,
+                               OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL,
+                               NULL);
+    QVERIFY(hFile != INVALID_HANDLE_VALUE);
+
+    // Hash calculation must fail because file is locked exclusively
+    QByteArray lockedHash = File::FileService::calculateFileHash(filePath);
+    QVERIFY(lockedHash.isEmpty());
+
+    // Indeterminate hash verification: must treat as potentially modified / unsafe
+    QVERIFY(File::FileService::hasExternalModification(filePath, knownHash));
+
+    // safeSaveFile must abort with conflict and refusal to overwrite
+    Core::TextBuffer newBuffer;
+    newBuffer.insert(0, QStringLiteral("OVERWRITE_ATTEMPT\n"));
+    auto saveRes = File::FileService::safeSaveFile(filePath, newBuffer, knownHash);
+    QVERIFY(!saveRes.success);
+    QVERIFY(saveRes.hadConflict);
+
+    CloseHandle(hFile);
+#endif
+}
+
+void TestProbes::testAssetRelocationJournalPersistenceAndRollback() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    QString testDraftId = QStringLiteral("journal-test-draft-uuid");
+    QString draftAssetsPath = File::FileService::untitledDraftAssetsDirectory(testDraftId) + QStringLiteral("/assets");
+    QDir().mkpath(draftAssetsPath);
+    QString draftImageFile = QDir(draftAssetsPath).filePath(QStringLiteral("photo_journal.png"));
+    {
+        QFile f(draftImageFile);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("IMAGE_DATA_STAGING");
+        f.close();
+    }
+
+    QString targetDocPath = tempDir.filePath(QStringLiteral("my_doc.md"));
+    QString targetAssetsDir = tempDir.filePath(QStringLiteral("assets"));
+    QDir().mkpath(targetAssetsDir);
+    QString existingAssetPath = QDir(targetAssetsDir).filePath(QStringLiteral("photo_journal.png"));
+    {
+        QFile f(existingAssetPath);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("PRE_EXISTING_ASSET_DATA");
+        f.close();
+    }
+
+    // 1. Prepare transaction
+    File::AssetRelocationTransaction tx;
+    QVERIFY(tx.prepare(testDraftId, targetDocPath));
+
+    // Verify journal file exists in targetAssetsDir
+    QDir assetsDir(targetAssetsDir);
+    QStringList journalFiles = assetsDir.entryList(QStringList() << QStringLiteral(".relocation_journal_*.tmp"), QDir::Files);
+    QCOMPARE(journalFiles.size(), 1);
+
+    QString journalPath = assetsDir.filePath(journalFiles.first());
+    {
+        QFile jf(journalPath);
+        QVERIFY(jf.open(QIODevice::ReadOnly | QIODevice::Text));
+        QString journalContent = QString::fromUtf8(jf.readAll());
+        QVERIFY(journalContent.contains(QStringLiteral("BACKUP:")));
+        QVERIFY(journalContent.contains(QStringLiteral("TRANSFERRED:")));
+        QVERIFY(journalContent.contains(QStringLiteral("photo_journal.png")));
+    }
+
+    // 2. Rollback
+    tx.rollback();
+
+    // After rollback: journal must be cleaned up
+    QVERIFY(!QFile::exists(journalPath));
+
+    // Original asset must be restored
+    {
+        QFile f(existingAssetPath);
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        QCOMPARE(f.readAll(), QByteArray("PRE_EXISTING_ASSET_DATA"));
+    }
+
+    // 3. Retry and Commit
+    File::AssetRelocationTransaction tx2;
+    QVERIFY(tx2.prepare(testDraftId, targetDocPath));
+
+    // Journal should exist again
+    journalFiles = assetsDir.entryList(QStringList() << QStringLiteral(".relocation_journal_*.tmp"), QDir::Files);
+    QCOMPARE(journalFiles.size(), 1);
+    journalPath = assetsDir.filePath(journalFiles.first());
+    QVERIFY(QFile::exists(journalPath));
+
+    tx2.commit();
+
+    // After commit: journal cleaned up, draft staging cleaned up, new asset in place
+    QVERIFY(!QFile::exists(journalPath));
+    QVERIFY(!QFile::exists(draftImageFile));
+    {
+        QFile f(existingAssetPath);
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        QCOMPARE(f.readAll(), QByteArray("IMAGE_DATA_STAGING"));
+    }
 }
 
 QTEST_MAIN(TestProbes)

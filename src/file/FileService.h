@@ -67,6 +67,7 @@ public:
 
 private:
     QString m_untitledId;
+    QString m_journalPath;
     QList<RelocationBackupItem> m_backups;
     QList<RelocationTransferredItem> m_transferred;
     bool m_committed = false;

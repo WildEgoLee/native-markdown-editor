@@ -43,7 +43,11 @@ bool FileService::hasExternalModification(const QString &filePath, const QByteAr
         return false;
     }
     QByteArray currentHash = calculateFileHash(filePath);
-    return !currentHash.isEmpty() && currentHash != lastKnownHash;
+    if (currentHash.isEmpty()) {
+        // Cannot read the file on disk to verify integrity: treat as potentially modified/unsafe
+        return true;
+    }
+    return currentHash != lastKnownHash;
 }
 
 bool FileService::loadFile(const QString &filePath, Core::TextBuffer &buffer, QString &outError) {
@@ -65,13 +69,43 @@ SaveResult FileService::safeSaveFile(const QString &filePath, const Core::TextBu
 
     // Check conflict
     if (!lastKnownHash.isEmpty() && QFile::exists(filePath)) {
-        if (hasExternalModification(filePath, lastKnownHash)) {
+        QByteArray currentHash = calculateFileHash(filePath);
+        if (currentHash.isEmpty()) {
+            res.success = false;
+            res.hadConflict = true;
+            res.errorMessage = QStringLiteral("无法读取目标文件进行完整性校验（可能被独占或权限受限），已终止保存以防覆盖。");
+            return res;
+        }
+        if (currentHash != lastKnownHash) {
             res.success = false;
             res.hadConflict = true;
             res.errorMessage = QStringLiteral("File was modified by another program.");
             return res;
         }
     }
+
+    // Read-only file protection: explicitly refuse to overwrite read-only files
+#ifdef Q_OS_WIN
+    std::wstring wTarget = filePath.toStdWString();
+    DWORD origAttrs = INVALID_FILE_ATTRIBUTES;
+    if (QFile::exists(filePath)) {
+        origAttrs = GetFileAttributesW(wTarget.c_str());
+        if (origAttrs != INVALID_FILE_ATTRIBUTES && (origAttrs & FILE_ATTRIBUTE_READONLY)) {
+            res.success = false;
+            res.errorMessage = QStringLiteral("目标文件被设置为只读，已拒绝写入以保护用户数据。");
+            return res;
+        }
+    }
+#else
+    if (QFile::exists(filePath)) {
+        QFileInfo targetInfo(filePath);
+        if (!targetInfo.isWritable()) {
+            res.success = false;
+            res.errorMessage = QStringLiteral("目标文件被设置为只读，已拒绝写入以保护用户数据。");
+            return res;
+        }
+    }
+#endif
 
     QFileInfo fi(filePath);
     QDir dir = fi.dir();
@@ -110,11 +144,6 @@ SaveResult FileService::safeSaveFile(const QString &filePath, const Core::TextBu
     // Atomic replace
 #ifdef Q_OS_WIN
     std::wstring wTemp = tempFilePath.toStdWString();
-    std::wstring wTarget = filePath.toStdWString();
-
-    if (QFile::exists(filePath)) {
-        SetFileAttributesW(wTarget.c_str(), FILE_ATTRIBUTE_NORMAL);
-    }
 
     BOOL ok = FALSE;
     DWORD err = 0;
@@ -149,6 +178,11 @@ SaveResult FileService::safeSaveFile(const QString &filePath, const Core::TextBu
         res.success = false;
         res.errorMessage = QStringLiteral("MoveFileExW failed with Windows error code: ") + QString::number(err);
         return res;
+    }
+
+    // Preserve original file attributes (such as hidden, system, archive)
+    if (origAttrs != INVALID_FILE_ATTRIBUTES) {
+        SetFileAttributesW(wTarget.c_str(), origAttrs);
     }
 #else
     if (QFile::exists(filePath)) {
@@ -402,6 +436,23 @@ bool AssetRelocationTransaction::prepare(const QString &untitledId, const QStrin
         m_transferred.append({destFile});
     }
 
+    // Write persistent transaction journal to survive process crash
+    if (!m_backups.isEmpty() || !m_transferred.isEmpty()) {
+        QString journalName = QStringLiteral(".relocation_journal_%1.tmp").arg(QRandomGenerator::global()->generate());
+        m_journalPath = QDir(targetAssetsPath).filePath(journalName);
+        QFile journal(m_journalPath);
+        if (journal.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream out(&journal);
+            for (const auto &b : m_backups) {
+                out << "BACKUP:" << b.originalPath << "|" << b.backupPath << "\n";
+            }
+            for (const auto &t : m_transferred) {
+                out << "TRANSFERRED:" << t.finalPath << "\n";
+            }
+            journal.close();
+        }
+    }
+
     return true;
 }
 
@@ -418,16 +469,39 @@ void AssetRelocationTransaction::rollback() {
     }
     m_transferred.clear();
 
-    // 2. Restore all pre-existing destination backups
+    // 2. Restore all pre-existing destination backups with retry and fallback
     for (const auto &item : m_backups) {
         if (QFile::exists(item.backupPath)) {
             if (QFile::exists(item.originalPath)) {
                 QFile::remove(item.originalPath);
             }
-            QFile::rename(item.backupPath, item.originalPath);
+            bool restored = false;
+            for (int r = 0; r < 10; ++r) {
+                if (QFile::rename(item.backupPath, item.originalPath)) {
+                    restored = true;
+                    break;
+                }
+#ifdef Q_OS_WIN
+                Sleep(10);
+#endif
+            }
+            if (!restored) {
+                if (QFile::copy(item.backupPath, item.originalPath)) {
+                    QFile::remove(item.backupPath);
+                } else {
+                    qWarning() << "[AssetRelocationTransaction::rollback] Failed to restore backup:"
+                               << item.backupPath << "-> backup preserved on disk to protect user data.";
+                }
+            }
         }
     }
     m_backups.clear();
+
+    // 3. Remove transaction journal
+    if (!m_journalPath.isEmpty() && QFile::exists(m_journalPath)) {
+        QFile::remove(m_journalPath);
+        m_journalPath.clear();
+    }
 }
 
 void AssetRelocationTransaction::commit() {
@@ -444,7 +518,13 @@ void AssetRelocationTransaction::commit() {
     m_backups.clear();
     m_transferred.clear();
 
-    // 2. Clean up draft assets folder
+    // 2. Remove transaction journal
+    if (!m_journalPath.isEmpty() && QFile::exists(m_journalPath)) {
+        QFile::remove(m_journalPath);
+        m_journalPath.clear();
+    }
+
+    // 3. Clean up draft assets folder
     if (!m_untitledId.isEmpty()) {
         FileService::removeUntitledDraftAssetsDirectory(m_untitledId);
     }
